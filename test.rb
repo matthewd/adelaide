@@ -8,7 +8,5 @@ unless pp.parse
   pp.raise_error
 end
 
-p pp.ast
 Rubinius::AST::AsciiGrapher.new(pp.ast, Adelaide::Parser::AST::Node).print
-#puts pp.ast.render
 
