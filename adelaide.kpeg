@@ -191,10 +191,10 @@ statement = statement:v s kw("if") - expr(false):c ~if_([maybe(c,v)])
           | kw("BEGIN") - "{" - statements:s - "}" ~big_begin(s)
           | kw("END") - "{" - statements:s - "}" ~big_end(s)
           | lhs:l s "=" !"=" !">" !"~" - mrhs:v ~assign(l,v)
-          | mlhs:l s "=" !"=" !">" !"~" - mrhs:v { p l } ~assign(l,v)
+          | mlhs:l s "=" !"=" !">" !"~" - mrhs:v ~assign(l,v)
           | lhs:l s "=" !"=" !">" !"~" - command_call(false):v ~assign(l,v)
-          | mlhs:l s "=" !"=" !">" !"~" - command_call(false):v { p l } ~assign(l,v)
-          | mlhs:l s "=" !"=" !">" !"~" - arg(false):v { p l } ~assign(l,v)
+          | mlhs:l s "=" !"=" !">" !"~" - command_call(false):v ~assign(l,v)
+          | mlhs:l s "=" !"=" !">" !"~" - arg(false):v ~assign(l,v)
           | variable:l s op_asgn:o - command_call(false):v ~op_assign_0(l,o,v)
           | primary(false):l s "[" - aref_args:i - "]" - op_asgn:o - command_call(false):v ~op_assign_1(l,i,o,v)
           | primary(false):t s "." - word:n - op_asgn:o - command_call(false):v ~op_assign_2(l,n,o,v)
@@ -613,7 +613,7 @@ literal = numeric
 
 strings(strict) = string:s ~str(s)
                 | "%Q" </[^A-Za-z0-9]/> { strend = string_end(text) } qstring([strend]):s <.> &{ text == strend } ~str(s)
-                | "%q" </[^A-Za-z0-9]/> { p text; strend = string_end(text) } lstring([strend], ["\\"]):s <.> &{ p s; p text; text == strend } ~str(s)
+                | "%q" </[^A-Za-z0-9]/> { strend = string_end(text) } lstring([strend], ["\\"]):s <.> &{ text == strend } ~str(s)
                 | "%" </[^A-Za-z0-9]/> { strend = string_end(text) } qstring([strend]):s <.> &{ text == strend } ~str(s)
                 | "<<" "-"?:indent heredoc_ref(indent):r { r }
 
@@ -639,7 +639,7 @@ regexp(strict) = "/" !any_whitespace qstring(["/"]):s "/" re_flags:f ~regexp(str
 
 re_flags = < /[imux]*/ > { text }
 
-words = "%w" </[^A-Za-z0-9]/> { p text; strend = string_end(text) } word_list(text, strend)? <.> &{ text == strend }
+words = "%w" </[^A-Za-z0-9]/> { strend = string_end(text) } word_list(text, strend)? <.> &{ text == strend }
 
 word_space = newline
            | " "
