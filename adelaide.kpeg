@@ -1,5 +1,11 @@
 %% name = Adelaide::Parser
 %% {
+
+# The big ambiguities:
+#  / -- divide vs regexp
+#  : -- symbol vs ternary vs "then" vs ::
+#  << -- heredoc vs lshift
+
   attr_accessor :ast
 
   attr_accessor :heredocs
@@ -25,14 +31,14 @@
   # is a dstr
   def str(parts)
     x = []
-    parts.each do |p|
-      if String === x.last && String === p
-        x.last << p
+    parts.each do |part|
+      if String === x.last && String === part
+        x.last << part
       else
-        x << p
+        x << part
       end
     end
-    x = x.map {|p| String === p ? str_(p) : p }
+    x = x.map {|part| String === part ? str_(part) : part }
 
     if x.size == 1 && AST::String === x.first
       x.first
@@ -70,17 +76,34 @@
   class AST::Float < AST::Node
     def negate=(v); @negate = v; end
   end
+  class AST::LocalSend < AST::Node
+    def as_command(args,block)
+      @args, @block = args, block
+      self
+    end
+  end
+  class AST::ObjSend < AST::Node
+    def as_command(args,block)
+      @args, @block = args, block
+      self
+    end
+  end
+  class AST::ScopedConstant < AST::Node
+    def as_command(args,block)
+      AST::ObjSend.new(@parent, @name, args, block)
+    end
+  end
   class AST::DString < AST::Node
     def collapse
       x = []
-      parts.each do |p|
-        if ::String === x.last && ::String === p
-          x.last << p
+      parts.each do |part|
+        if ::String === x.last && ::String === part
+          x.last << part
         else
-          x << p
+          x << part
         end
       end
-      x = x.map {|p| ::String === p ? AST::String.new(p) : p }
+      x = x.map {|part| ::String === part ? AST::String.new(part) : part }
 
       @parts = x
 
@@ -102,6 +125,22 @@
   end
 
 
+  def command_candidate?(candidate, assignment)
+    case candidate
+    when AST::LocalSend, AST::ObjSend
+      if candidate.args.nil? && candidate.block.nil?
+        true
+      elsif candidate.name == "[]" && assignment
+        true
+      end
+    when AST::ScopedConstant
+      true
+    else
+      false
+    end
+  end
+
+
   RESERVED = %w(
     __LINE__ __FILE__ BEGIN END alias and begin break case class def
     defined? do else elsif end ensure false for in module next nil not
@@ -113,11 +152,16 @@
 eof = !.
 
 #sp = /([ \t\n\v\r]+|#[^\r\n]*[\r\n]*)+/
-space_element = /[ \t\v]+/ | newline | /#[^\r\n]*/
+space_element = hspace | newline | comment
+comment = /#[^\r\n]*/
+hspace = /[ \t\v]+/
+
+any_whitespace = /[ \t\n\r\n]+/
+
 wsp = space_element+
 - = space_element*
-sp = /[ \t\v]+/
-s = /[ \t\v]*/
+sp = (hspace | comment)+
+s = (hspace | comment)*
 
 %% root = ast Root(value)
 
@@ -128,7 +172,7 @@ program = statements
 statements = - stmts:s opt_terms { s }
 
 %% body = ast Body(stmts, rescue_, else_, ensure_)
-block_body = statements:a - rescue_clause*:b - else_clause?:c - ensure_clause?:d ~body(a,b,c,d)
+block_body = statements:a (- rescue_clause)*:b - else_clause?:c - ensure_clause?:d ~body(a,b,c,d)
 
 stmts = stmts:l terms - statement:s { l + [s] }
       | statement:s { [s] }
@@ -146,16 +190,16 @@ statement = statement:v s kw("if") - expr:c ~if_([maybe(c,v)])
           | kw("undef") - undef_list:n ~undef_(n)
           | kw("BEGIN") - "{" - statements:s - "}" ~big_begin(s)
           | kw("END") - "{" - statements:s - "}" ~big_end(s)
-          | lhs:l s "=" - command_call:v ~assign(l,v)
-          | mlhs:l s "=" - command_call:v ~assign(l,v)
+          | lhs:l s "=" !"=" !">" !"~" - command_call:v ~assign(l,v)
+          | mlhs:l s "=" !"=" !">" !"~" - command_call:v ~assign(l,v)
           | variable:l s op_asgn:o - command_call:v ~op_assign_0(l,o,v)
           | primary:l s "[" - aref_args:i - "]" - op_asgn:o - command_call:v ~op_assign_1(l,i,o,v)
-          | primary:t s "." - member:n - op_asgn:o - command_call:v ~op_assign_2(l,n,o,v)
+          | primary:t s "." - word:n - op_asgn:o - command_call:v ~op_assign_2(l,n,o,v)
           | primary:t s "::" - name:n - op_asgn:o - command_call:v ~op_assign_2(l,n,o,v)
           | backref s op_asgn - command_call
-          | lhs:l s "=" - mrhs:v ~assign(l,v)
-          | mlhs:l s "=" - mrhs:v ~assign(l,v)
-          | mlhs:l s "=" - arg:v ~assign(l,v)
+          | lhs:l s "=" !"=" !">" !"~" - mrhs:v ~assign(l,v)
+          | mlhs:l s "=" !"=" !">" !"~" - mrhs:v ~assign(l,v)
+          | mlhs:l s "=" !"=" !">" !"~" - arg:v ~assign(l,v)
           | expr:e { e }
 
 alias_statement = kw("alias") fitem fitem
@@ -165,12 +209,13 @@ alias_statement = kw("alias") fitem fitem
 %% logical_and = ast LogicalAnd(left, right)
 %% logical_or = ast LogicalOr(left, right)
 %% logical_not = ast LogicalNot(value)
-expr = expr:l - kw("and") - expr:r ~logical_and(l,r)
-     | expr:l - kw("or") - expr:r ~logical_or(l,r)
-     | kw("not") - expr:e ~logical_not(e)
-     | "!" - expr:e ~logical_not(e)
-     | command_call:c { c }
-     | arg:a { a }
+expr = expr:l - kw("and") - expr2:r ~logical_and(l,r)
+     | expr:l - kw("or") - expr2:r ~logical_or(l,r)
+     | expr2:e { e }
+expr2 = kw("not") - expr2:e ~logical_not(e)
+      | "!" - expr2:e ~logical_not(e)
+      | command_call:c { c }
+      | arg:a { a }
 
 %% return_ = ast Return(value)
 %% break_ = ast Break(value)
@@ -185,9 +230,9 @@ expr = expr:l - kw("and") - expr:r ~logical_and(l,r)
 command_call = block_call:t s dot_or_colon - operation2:n command_args:a ~obj_send(t,n,a,nil)
              | block_call:c { c }
              | command:c { c }
-             | kw("return") - call_args:v ~return_(v)
-             | kw("break") - call_args:v ~break_(v)
-             | kw("next") - call_args:v ~next_(v)
+             | kw("return") - loose_call_args:v ~return_(v)
+             | kw("break") - loose_call_args:v ~break_(v)
+             | kw("next") - loose_call_args:v ~next_(v)
 
 
 %% block = ast Block(vars, body)
@@ -198,6 +243,7 @@ command = primary:t s dot_or_colon - operation2:n command_args:a s cmd_brace_blo
         | operation:op command_args:a (s cmd_brace_block)?:b ~local_send(op,a,b)
         | kw("super") command_args:v ~super_(v)
         | kw("yield") command_args:v ~yield_(v)
+        | primary:c command_args:a &{ command_candidate?(c, false) } (s cmd_brace_block)?:b { c.as_command(a,b) }
 
 mlhs = "(" - mlhs - ")"
      | mlhs_head - mlhs_item
@@ -210,8 +256,7 @@ mlhs_head = mlhs_head - mlhs_item - ","
 mlhs_item = "(" - mlhs - ")"
           | mlhs_node
 
-mlhs_node = primary:t s "[" - aref_args:a - "]"
-          | primary:t s dot_or_colon - member:n
+mlhs_node = primary:t &{ command_candidate?(t, true) } ~t
           | "::" - constant:c ~toplevel_constant(c)
           | backref
           | variable
@@ -222,12 +267,12 @@ cname = identifier
       | constant
 
 cpath = "::" - cname:c ~toplevel_constant(c)
-      | primary:v s "::" - cname:c ~scoped_constant(v,c)
+      | primary:v &{ AST::ScopedConstant === v } ~v
       | cname:c ~constant_access(c)
 
 fname = fid
-      | identifier
-      | constant
+      | identifier "="?
+      | constant "="?
       | < opmethod > { text }
 
 fitem = fname
@@ -297,48 +342,48 @@ op_asgn = < "**="
 %% op_assign_1 = ast OpAssign1(target,index,op,value)
 %% op_assign_2 = ast OpAssign2(target,name,op,value)
 
-arg = arg:l - ".." - arg:r ~range(l,r,true)
-    | arg:l - "..." - arg:r ~range(l,r,false)
-    | arg:l - "+" - arg:r ~plus(l,r)
-    | arg:l - "-" - arg:r ~minus(l,r)
-    | arg:l - "*" - arg:r ~mult(l,r)
-    | arg:l - "/" - arg:r ~div(l,r)
-    | arg:l - "%" - arg:r ~mod(l,r)
-    | arg:l - "**" - arg:r ~pow(l,r)
-    | "-" - integer:l - "**" - arg:r
-    | "-" - float:l - "**" - arg:r
+arg = arg:l s ".." !"." - arg:r ~range(l,r,true)
+    | arg:l s "..." - arg:r ~range(l,r,false)
+    | arg:l s "+" !"=" - arg:r ~plus(l,r)
+    | arg:l s "-" !"=" - arg:r ~minus(l,r)
+    | arg:l s "*" !"*" !"=" - arg:r ~mult(l,r)
+    | arg:l s "/" !"=" - arg:r ~div(l,r)
+    | arg:l s "%" !"=" - arg:r ~mod(l,r)
+    | "-" - integer:l s "**" - arg:r
+    | "-" - float:l s "**" - arg:r
     | "+" - arg:v ~unary_plus(v)
     | "-" - arg:v ~unary_minus(v)
-    | arg:l - "|" - arg:r ~bit_or(l,r)
-    | arg:l - "^" - arg:r ~bit_xor(l,r)
-    | arg:l - "&" - arg:r ~bir_and(l,r)
-    | arg:l - "<=>" - arg:r
-    | arg:l - ">" - arg:r
-    | arg:l - ">=" - arg:r
-    | arg:l - "<" - arg:r
-    | arg:l - "<=" - arg:r
-    | arg:l - "==" - arg:r
-    | arg:l - "===" - arg:r
-    | arg:l - "!=" - arg:r
-    | arg:l - "=~" - arg:r
-    | arg:l - "!~" - arg:r
+    | arg:l s "**" !"=" - arg:r ~pow(l,r)
+    | arg:l s "|" !"|" !"=" - arg:r ~bit_or(l,r)
+    | arg:l s "^" !"=" - arg:r ~bit_xor(l,r)
+    | arg:l s "&" !"&" !"=" - arg:r ~bir_and(l,r)
+    | arg:l s "<=>" - arg:r
+    | arg:l s ">" !"=" !">" - arg:r
+    | arg:l s ">=" - arg:r
+    | arg:l s "<" !"=" !"<" - arg:r
+    | arg:l s "<=" !">" - arg:r
+    | arg:l s "==" !"=" - arg:r
+    | arg:l s "===" - arg:r
+    | arg:l s "!=" - arg:r
+    | arg:l s "=~" - arg:r
+    | arg:l s "!~" - arg:r
     | "!" - arg:v ~logical_not(v)
     | "~" - arg:v ~bit_not(v)
-    | arg:l - "<<" - arg:r ~lshift(l,r)
-    | arg:l - ">>" - arg:r ~rshift(l,r)
-    | arg:l - "&&" - arg:r ~logical_and(l,r)
-    | arg:l - "||" - arg:r ~logical_or(l,r)
-    | kw("defined?") - newline? - arg:v ~defined_(v)
-    | arg:c - "?" - arg:t - ":" - arg:f ~ternary(c,t,f)
-    | lhs:l - "=" - arg:v - kw("rescue") - arg:r ~assign(l,recover(v,r))
-    | lhs:l - "=" - arg:v ~assign(l,v)
-    | variable:l - op_asgn:o - arg:v ~op_assign_0(l,o,v)
-    | primary:t - "[" - aref_args:i - "]" - op_asgn:o - arg:v ~op_assign_1(t,i,o,v)
-    | primary:t - "." - member:n - op_asgn:o - arg:v ~op_assign_2(t,n,o,v)
-    | (primary:t - "::" - constant:c ~scoped_constant(t,c)):c - op_asgn:o - arg:v ~constant_assignment(c,o,v)
-    | primary:t - "::" - identifier:n - op_asgn:o - arg:v ~op_assign_2(t,n,o,v)
-    | ("::" - constant:c ~toplevel_constant(c)):c - op_asgn:o - arg:v ~constant_assignment(c,o,v)
-    | backref - op_asgn - arg
+    | arg:l s "<<" !"=" - arg:r ~lshift(l,r)
+    | arg:l s ">>" !"=" - arg:r ~rshift(l,r)
+    | arg:l s "&&" !"=" - arg:r ~logical_and(l,r)
+    | arg:l s "||" !"=" - arg:r ~logical_or(l,r)
+    | kw("defined?") - arg:v ~defined_(v)
+    | arg:c s "?" - arg:t - ":" - arg:f ~ternary(c,t,f)
+    | lhs:l s "=" !"=" !">" !"~" - arg:v s kw("rescue") - arg:r ~assign(l,recover(v,r))
+    | lhs:l s "=" !"=" !">" !"~" - arg:v ~assign(l,v)
+    | variable:l s op_asgn:o - arg:v ~op_assign_0(l,o,v)
+    | primary:t s "[" - aref_args:i - "]" s op_asgn:o - arg:v ~op_assign_1(t,i,o,v)
+    | primary:t s "." - word:n s op_asgn:o - arg:v ~op_assign_2(t,n,o,v)
+    | (primary:t s "::" - constant:c ~scoped_constant(t,c)):c s op_asgn:o - arg:v ~constant_assignment(c,o,v)
+    | primary:t s "::" - identifier:n s op_asgn:o - arg:v ~op_assign_2(t,n,o,v)
+    | ("::" - constant:c ~toplevel_constant(c)):c s op_asgn:o - arg:v ~constant_assignment(c,o,v)
+    | backref s op_asgn - arg
     | primary
 
 %% hash = ast Hash(elements)
@@ -355,18 +400,20 @@ arg = arg:l - ".." - arg:r ~range(l,r,true)
 %% splat = ast Splat(value)
 %% amplify = ast Amplify(value)
 
-aref_args = "*" arg:s (- newline)? ~splat(s)
+aref_args = command:v (- newline)? { [v] }
+          | "*" arg:s (- newline)? ~splat(s)
           | assocs:l (- ",")? { l }
           | args:l - "," - "*" arg:s (- newline)? { l + splat(s) }
           | args:l (- ",")? { l }
-          | command:v (- newline)? { [v] }
 
 paren_args = "(" - ")" { [] }
            | "(" - call_args:a - newline? - ")" { a }
            | "(" - block_call:b - newline? - ")" { [b] }
            | "(" - args:a - "," - block_call:b - newline? - ")" { a + [b] }
 
-call_args = args:a - "," - assocs:h - "," - "*" arg:s opt_block_arg:b { a + [hash(h), splat(s)] + b }
+loose_call_args = !kw("if") !kw("unless") !kw("while") !kw("until") call_args:a ~a
+call_args = command:c { [c] }
+          | args:a - "," - assocs:h - "," - "*" arg:s opt_block_arg:b { a + [hash(h), splat(s)] + b }
           | args:a - "," - assocs:h opt_block_arg:b { a + [hash(h)] + b }
           | args:a - "," - "*" arg:s opt_block_arg:b { a + [splat(s)] + b }
           | args:a opt_block_arg:b { a + b }
@@ -374,7 +421,7 @@ call_args = args:a - "," - assocs:h - "," - "*" arg:s opt_block_arg:b { a + [has
           | assocs:h opt_block_arg:b { [hash(h)] + b }
           | "*" arg:s opt_block_arg:b { [splat(s)] + b }
           | block_arg:b { [b] }
-          | command:c { [c] }
+
 
 call_args2 = arg:v - "," - args:a opt_block_arg:b { [v] + a + b }
            | arg:v - "," - block_arg:b { [v,b] }
@@ -391,7 +438,7 @@ call_args2 = arg:v - "," - args:a opt_block_arg:b { [v] + a + b }
 
 command_args = "(" - call_args2:a - ")" { a }
              | "(" - ")" { [] }
-             | sp call_args:a { a }
+             | sp loose_call_args:a { a }
 
 
 block_arg = "&" - arg:v ~amplify(v)
@@ -417,7 +464,7 @@ mrhs = args:l - "," - arg:v { l + [v] }
 %% constant_access = ast ConstantAccess(name)
 %% variable_access = ast VariableAccess(name)
 
-%% chunk = ast Chunk(value)
+%% statements = ast Statements(value)
 
 %% class_ = ast Class(name, parent, body)
 %% singleton_class = ast SingletonClass(value, body)
@@ -428,9 +475,9 @@ mrhs = args:l - "," - arg:v { l + [v] }
 primary = primary:t s "::" - constant:c ~scoped_constant(t,c)
         | primary:t s "[" - aref_args:a - "]" ~obj_send(t, "[]", a, nil)
         | primary:t s dot_or_colon - operation2:n paren_args:a s brace_block:b ~obj_send(t,n,a,b)
-        | primary:t s dot_or_colon - operation2:n s brace_block:b ~obj_send(t,n,[],b)
+        | primary:t s dot_or_colon - operation2:n s brace_block:b ~obj_send(t,n,nil,b)
         | primary:t s dot_or_colon - operation2:n paren_args:a ~obj_send(t,n,a,nil)
-        | primary:t s dot_or_colon - operation2:n ~obj_send(t,n,[],nil)
+        | primary:t s dot_or_colon - operation3:n ~obj_send(t,n,nil,nil)
         | operation:n paren_args:a s brace_block:b ~local_send(n,a,b)
         | operation:n paren_args:a ~local_send(n,a,nil)
         | kw("super") paren_args:v s brace_block:b
@@ -445,11 +492,11 @@ primary = primary:t s "::" - constant:c ~scoped_constant(t,c)
         | words
         | qwords
         | backref
-        | fid:n ~local_send(n,[],nil)
+        | fid:n ~local_send(n,nil,nil)
         | variable
-        | kw("begin") - block_body:b - kw("end") { b } ~chunk(b)
+        | kw("begin") - block_body:b - kw("end") { b } ~statements(b)
         | "(" - expr:e - newline? - ")" { e }
-        | "(" - statements:s - ")" ~chunk(s)
+        | "(" - statements:s - ")" ~statements(s)
         | "::" - constant:c ~toplevel_constant(c)
         | "[" - aref_args:a - "]" ~array(a)
         | "{" - assoc_list:l - "}" ~hash(l)
@@ -459,7 +506,7 @@ primary = primary:t s "::" - constant:c ~scoped_constant(t,c)
         | kw("yield") s "(" - call_args:v - ")" ~yield_(v)
         | kw("yield") s "(" - ")" ~yield_(nil)
         | kw("yield") ~yield_(nil)
-        | kw("defined?") s newline? - "(" - expr:v - ")" ~defined_(v)
+        | kw("defined?") - "(" - expr:v - ")" ~defined_(v)
         | kw("if") - expr:e then - statements:s - if_tail:l - kw("end") { if_([maybe(e,s)] + l) }
         | kw("unless") - expr:e then - statements:s - else_clause?:f - kw("end") ~unless_(e,s,f)
         | kw("while") - expr:e - statements:s - kw("end") ~while_(e,s)
@@ -500,11 +547,11 @@ for_var = lhs
 block_par = block_par:l - "," - mlhs_item:i { l + [[:lhs, i]] }
           | mlhs_item:i { [[:lhs, i]] }
 
-block_var = block_par:p - "," - "&" - lhs:b { p + [[:block, b]] }
-          | block_par:p - "," - splat_lhs:s - "," - "&" - lhs:b { p + [[:rest, s], [:block, b]] }
-          | block_par:p - "," - splat_lhs:s { p + [[:rest, s]] }
-          | block_par:p - "," { p }
-          | block_par:p { p }
+block_var = block_par:l - "," - "&" - lhs:b { l + [[:block, b]] }
+          | block_par:l - "," - splat_lhs:s - "," - "&" - lhs:b { l + [[:rest, s], [:block, b]] }
+          | block_par:l - "," - splat_lhs:s { l + [[:rest, s]] }
+          | block_par:l - "," { l }
+          | block_par:l { l }
           | splat_lhs:s - "," - "&" - lhs:b { [[:rest, s], [:block, b]] }
           | splat_lhs:s { [[:rest, s]] }
           | "&" - lhs:b { [[:block, b]] }
@@ -531,7 +578,7 @@ brace_block = "{" - opt_block_var:v - statements:b - "}" ~block(v,b)
 
 %% when_ = ast When(cond, value)
 when_clause = kw("when") - when_args:a then - statements:s ~when_(a,s)
-#case_body = when_clause:w - cases:l { [w] + l }
+
 case_body = when_clause:w - case_body:l { [w] + l }
           | when_clause:w { [w] }
           | else_clause:e { [e] }
@@ -571,8 +618,7 @@ strings = string:s ~str(s)
 heredoc_ref(indent) = "'" < /[^']+/ > "'" { heredoc(text, !!indent, dstr_([]), false) }
                     | "\"" < /[^"]+/ > "\"" { heredoc(text, !!indent, dstr_([]), true) }
                     | "`" < /[^`]+/ > "`" { heredoc(text, !!indent, xstr_(dstr_([])), true) }
-                    | < identifier > { heredoc(text, !!indent, dstr_([]), true) }
-                    | < constant > { heredoc(text, !!indent, dstr_([]), true) }
+                    | < word > { heredoc(text, !!indent, dstr_([]), true) }
 
 string = < string:a string1:b > { a+b }
        | string1
@@ -581,11 +627,18 @@ string1 = "\"" qstring(["\""]):s "\"" { s }
         | "'" lstring(["'"], ["\\"]):s "'" { s }
 
 %% xstr_ = ast XString(str)
-xstring = "`" qstring(["`"]) "`"
-        | "%x" /[^A-Za-z0-9]/:lft { strend = string_end(lft) } qstring([strend]) .:rgt &{ rgt == strend }
+xstring = "`" qstring(["`"]):s "`" { xstr_(str(s)) }
+        | "%x" /[^A-Za-z0-9]/:lft { strend = string_end(lft) } qstring([strend]):s .:rgt &{ rgt == strend } { xstr_(str(s)) }
 
-regexp = "/" qstring(["/"]) "/"
-       | "%r" /[^A-Za-z0-9]/:lft { strend = string_end(lft) } qstring([strend]) .:rgt &{ rgt == strend }
+%% regexp = ast RegExp(value, flags)
+# FIXME: The second of these options -- the one that allows the regexp
+# to start with whitespace -- should only apply if we're at the start of
+# an expression (inside parens, for example), and not if we're trailing.
+regexp = "/" !any_whitespace qstring(["/"]):s "/" re_flags:f ~regexp(str(s),f)
+       | "/" qstring(["/"]):s "/" re_flags:f ~regexp(str(s),f)
+       | "%r" /[^A-Za-z0-9]/:lft { strend = string_end(lft) } qstring([strend]):s .:rgt &{ rgt == strend } re_flags:f ~regexp(str(s),f)
+
+re_flags = < /[imux]*/ > { text }
 
 words = "%w" /[^A-Za-z0-9]/:lft { strend = string_end(lft) } word_list(lft, strend)? .:rgt &{ rgt == strend }
 
@@ -615,11 +668,11 @@ qstring_item(stops) = "\\" newline { "" }
                     | < . > !{ stops.include?(text) } { text }
 qstring(stops) = qstring_item(stops)*:s { s }
 
-dyn_string_part = cvar
-                | ivar
+dyn_string_part = cvar:n ~variable_access(n)
+                | ivar:n ~variable_access(n)
                 | backref
-                | gvar
-                | "{" - statements:s - "}" { s }
+                | gvar:n ~variable_access(n)
+                | "{" - statements:s - "}" ~statements(s)
 
 
 symbol = ":" sym:s { s }
@@ -641,6 +694,7 @@ integer = "0" ("x" | "X") < /[0-9A-Fa-f]+/ ("_" < /[0-9A-Fa-f]+/ >)* > { integer
         | "0" ("d" | "D") < /[0-9]+/ ("_" < /[0-9]+/ >)* > { integer(text.to_i(10), false) }
         | "0" ("b" | "B") < /[0-1]+/ ("_" < /[0-1]+/ >)* > { integer(text.to_i(8), false) }
         | "0" ("o" | "O")? < /[0-7]+/ ("_" < /[0-7]+/ >)* > { integer(text.to_i(2), false) }
+        | "0" { integer(0, false) }
         | < /[1-9][0-9]*/ ("_" < /[0-9]+/ >)* > { integer(text.to_i(10), false) }
 
 %% float = ast Float(value, negate)
@@ -674,15 +728,24 @@ superclass = s "<" - expr:e term { e }
 f_arglist = "(" - f_args:a - opt_nl - ")" { a }
           | f_args:a term { a }
 
-f_args = f_arg:a - "," - f_optarg:o - "," - f_rest_arg:s - opt_f_block_arg:b { a + o + s + b }
-       | f_arg:a - "," - f_optarg:o - opt_f_block_arg:b { a + o + b }
-       | f_arg:a - "," - f_rest_arg:s - opt_f_block_arg:b { a + s + b }
-       | f_arg:a - opt_f_block_arg:b { a + b }
-       | f_optarg:o - "," - f_rest_arg:s - opt_f_block_arg:b { o + s + b }
-       | f_optarg:o opt_f_block_arg:b { o + b }
-       | f_rest_arg:s opt_f_block_arg:b { s + b }
+f_args_tail = f_optarg:o - "," - f_rest_arg:s opt_f_block_arg:b { o + s + b }
+            | f_optarg:o - opt_f_block_arg:b { o + b }
+            | f_rest_arg:s - opt_f_block_arg:b { s + b }
+            | f_norm_arg:n - "," - f_args_tail:l { [[:req, n]] + l }
+            | f_norm_arg:n opt_f_block_arg:b { [[:req, n]] + b }
+
+f_args = f_args_tail:l { l }
        | f_block_arg:b { [b] }
        | none { [] }
+#f_args = f_arg:a - "," - f_optarg:o - "," - f_rest_arg:s opt_f_block_arg:b { a + o + s + b }
+#       | f_arg:a - "," - f_optarg:o opt_f_block_arg:b { a + o + b }
+#       | f_arg:a - "," - f_rest_arg:s opt_f_block_arg:b { a + s + b }
+#       | f_arg:a opt_f_block_arg:b { a + b }
+#       | f_optarg:o - "," - f_rest_arg:s opt_f_block_arg:b { o + s + b }
+#       | f_optarg:o opt_f_block_arg:b { o + b }
+#       | f_rest_arg:s opt_f_block_arg:b { s + b }
+#       | f_block_arg:b { [b] }
+#       | none { [] }
 
 f_norm_arg = constant { error }
            | cvar { error }
@@ -691,14 +754,14 @@ f_norm_arg = constant { error }
            | name
 
 constant = < /[A-Z][A-Za-z0-9_]*/ > { text }
-cvar = < "@@" identifier > { text }
-ivar = < "@" identifier > { text }
-gvar = < "$" identifier > { text }
+cvar = < "@@" word > { text }
+ivar = < "@" word > { text }
+gvar = < "$" word > { text }
      | < "$" /[~*$?!@;,.=:<>\/\\"]/ > { text }
      | < "$-" /[A-Za-z0-9]/ > { text }
 
-f_arg = f_arg:l - "," - f_norm_arg:n { l << [:req, n] }
-      | f_norm_arg:n { [[:req, n]] }
+#f_arg = f_arg:l - "," - f_norm_arg:n { l << [:req, n] }
+#      | f_norm_arg:n { [[:req, n]] }
 
 
 f_opt = name:n - "=" - arg:v { [:opt, n, v] }
@@ -710,7 +773,7 @@ f_rest_arg = "*" name:n { [:rest, n] }
            | "*" { [:rest] }
 
 f_block_arg = "&" name:n { [:block, n] }
-opt_f_block_arg = "," - f_block_arg:b { [b] }
+opt_f_block_arg = - "," - f_block_arg:b { [b] }
                 | none { [] }
 
 singleton = variable:v { v }
@@ -730,20 +793,20 @@ operation = fid:f { f }
           | constant:c { c }
 
 operation2 = fid:f { f }
-           | name:i { i }
+           | identifier:i { i }
            | constant:c { c }
            | < opmethod > { text }
 
 operation3 = fid:f { f }
-           | name:i { i }
+           | identifier:i { i }
            | < opmethod > { text }
 
 identifier = < /[a-z_][A-Za-z0-9_]*/ > { text }
 name = < identifier > !{ RESERVED.include?(text) } { text }
-member = name | constant
 
-kw(w) = identifier:i &{ i == w } { i }
-      | constant:i &{ i == w } { i }
+word = < /[A-Za-z_][A-Za-z0-9_]*/ > { text }
+
+kw(w) = < word /[?!]?/ > &{ text == w } { w }
 
 fid = < /[A-Za-z0-9_]+[!?]/ > { text }
 
