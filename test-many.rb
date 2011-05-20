@@ -9,7 +9,7 @@ ARGF.read.each do |fn|
   unless pp.parse
     puts "Filename: #{fn}"
     pp.show_error(STDERR)
-    pp.raise_error
+    #pp.raise_error
     puts
   end
 end
