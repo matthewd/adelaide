@@ -72,7 +72,7 @@
       @value = @value.collapse
     end
     def stop?(line)
-      (@indent ? line.strip : line.chomp) == @term
+      (@indent ? line.strip : line.chomp) == @stop
     end
   end
   class AST::Int < AST::Node
@@ -122,8 +122,8 @@
     end
   end
 
-  def heredoc(term, indent, value, dynamic)
-    h = heredoc_(term, indent, value, dynamic)
+  def heredoc(stop, indent, value, dynamic)
+    h = heredoc_(stop, indent, value, dynamic)
     @heredocs << h
     h
   end
@@ -158,7 +158,6 @@
 
 eof = !.
 
-#sp = /([ \t\n\v\f\r]+|#[^\r\n]*[\r\n]*)+/
 space_element = hspace | newline | comment | escaped_newline
 escaped_newline = "\\" newline
 comment = /#[^\r\n]*/
@@ -173,7 +172,6 @@ s = (hspace | comment | escaped_newline)*
 
 %% root = ast Root(value)
 
-#root = { setup } primary:r - eof { @ast = r }
 root = { setup } program:r - eof { @ast = root(r) }
 program = statements
 
@@ -189,27 +187,26 @@ stmts = stmts:l terms - statement:s { l + [s] }
 %% big_begin = ast BigBegin(value)
 %% big_end = ast BigEnd(value)
 %% undef_ = ast Undef(names)
-statement = statement:v s kw("if") - expr(false):c ~if_([maybe(c,v)])
-          | statement:v s kw("unless") - expr(false):c ~unless_(c,v,nil)
-          | statement:v s kw("while") - expr(false):c ~while_(c,v)
-          | statement:v s kw("until") - expr(false):c ~until_(c,v)
+statement = statement:v s kw("if") - expr(false, false):c ~if_([maybe(c,v)])
+          | statement:v s kw("unless") - expr(false, false):c ~unless_(c,v,nil)
+          | statement:v s kw("while") - expr(false, false):c ~while_(c,v)
+          | statement:v s kw("until") - expr(false, false):c ~until_(c,v)
           | statement:v s kw("rescue") - statement:f ~recover(v,f)
           | alias_statement:a { a }
           | kw("undef") - undef_list:n ~undef_(n)
           | kw("BEGIN") - "{" - statements:s - "}" ~big_begin(s)
           | kw("END") - "{" - statements:s - "}" ~big_end(s)
-          | lhs:l s "=" !"=" !">" !"~" - mrhs:v ~assign(l,v)
+          | lhs(false):l s "=" !"=" !">" !"~" - mrhs:v ~assign(l,v)
           | mlhs:l s "=" !"=" !">" !"~" - mrhs:v ~assign(l,v)
-          | lhs:l s "=" !"=" !">" !"~" - command_call(false):v ~assign(l,v)
-          | mlhs:l s "=" !"=" !">" !"~" - command_call(false):v ~assign(l,v)
-          | mlhs:l s "=" !"=" !">" !"~" - arg(false):v ~assign(l,v)
-          | variable:l s op_asgn:o - command_call(false):v ~op_assign_0(l,o,v)
-          | primary(false):l "[" - aref_args:i - "]" s op_asgn:o - command_call(false):v ~op_assign_1(l,i,o,v)
-          | primary(false):t s "." - word:n s op_asgn:o - command_call(false):v ~op_assign_2(l,n,o,v)
-          | primary(false):t s "::" - name:n s op_asgn:o - command_call(false):v ~op_assign_2(l,n,o,v)
-          | primary(false):l &{ command_candidate?(t, true) } s op_asgn:o - command_call(false):v ~op_assign_0(l,o,v)
-          | backref s op_asgn - command_call(false)
-          | expr(false):e { e }
+          | lhs(false):l s "=" !"=" !">" !"~" - command_call(false, false):v ~assign(l,v)
+          | mlhs:l s "=" !"=" !">" !"~" - command_call(false, false):v ~assign(l,v)
+          | mlhs:l s "=" !"=" !">" !"~" - arg(false, false):v ~assign(l,v)
+          | variable:l s op_asgn:o - command_call(false, false):v ~op_assign_0(l,o,v)
+          | primary(false, false):l "[" - aref_args:i - "]" s op_asgn:o - command_call(false, false):v ~op_assign_1(l,i,o,v)
+          | primary(false, false):t s "." - word:n s op_asgn:o - command_call(false, false):v ~op_assign_2(l,n,o,v)
+          | primary(false, false):t s "::" - name:n s op_asgn:o - command_call(false, false):v ~op_assign_2(l,n,o,v)
+          | primary(false, false):l &{ command_candidate?(t, true) } s op_asgn:o - command_call(false, false):v ~op_assign_0(l,o,v)
+          | expr(false, false):e { e }
 
 %% alias_ = ast Alias(from, to)
 alias_statement = kw("alias") fitem:a fitem:b ~alias_(a,b)
@@ -219,13 +216,13 @@ alias_statement = kw("alias") fitem:a fitem:b ~alias_(a,b)
 %% logical_and = ast LogicalAnd(left, right)
 %% logical_or = ast LogicalOr(left, right)
 %% logical_not = ast LogicalNot(value)
-expr(strict) = expr(strict):l - kw("and") - expr2(false):r ~logical_and(l,r)
-             | expr(strict):l - kw("or") - expr2(false):r ~logical_or(l,r)
-             | expr2(strict):e { e }
-expr2(strict) = kw("not") - expr2(false):e ~logical_not(e)
-              | "!" - expr2(false):e ~logical_not(e)
-              | command_call(strict):c { c }
-              | arg(strict):a { a }
+expr(strict, no_do) = expr(strict, no_do):l - kw("and") - expr2(false, no_do):r ~logical_and(l,r)
+             | expr(strict, no_do):l - kw("or") - expr2(false, no_do):r ~logical_or(l,r)
+             | expr2(strict, no_do):e { e }
+expr2(strict, no_do) = kw("not") - expr2(false, no_do):e ~logical_not(e)
+              | "!" - expr2(false, no_do):e ~logical_not(e)
+              | command_call(strict, no_do):c { c }
+              | arg(strict, no_do):a { a }
 
 %% return_ = ast Return(value)
 %% break_ = ast Break(value)
@@ -237,23 +234,23 @@ expr2(strict) = kw("not") - expr2(false):e ~logical_not(e)
 
 %% defined_ = ast Defined(value)
 
-command_call(strict) = block_call(strict):t s dot_or_colon - operation2:n command_args:a ~obj_send(t,n,a,nil)
-                     | block_call(strict):c { c }
-                     | command(strict):c { c }
-                     | kw("return") - loose_call_args:v ~return_(v)
-                     | kw("break") - loose_call_args:v ~break_(v)
-                     | kw("next") - loose_call_args:v ~next_(v)
+command_call(strict, no_do) = block_call(strict):t s dot_or_colon - operation2:n command_args(no_do):a ~obj_send(t,n,a,nil)
+                     | !{ no_do } block_call(strict):c { c }
+                     | command(strict, no_do):c { c }
+                     | kw("return") - loose_call_args(no_do):v ~return_(v)
+                     | kw("break") - loose_call_args(no_do):v ~break_(v)
+                     | kw("next") - loose_call_args(no_do):v ~next_(v)
 
 
 %% block = ast Block(vars, body)
 cmd_brace_block = "{" - opt_block_var:v - statements:s - "}" ~block(v,s)
 
-command(strict) = primary(strict):t s dot_or_colon - operation2:n command_args:a s cmd_brace_block:b ~obj_send(t,n,a,b)
-                | primary(strict):t s dot_or_colon - operation2:n command_args:a ~obj_send(t,n,a,nil)
-                | operation:op command_args:a (s cmd_brace_block)?:b ~local_send(op,a,b)
-                | kw("super") command_args:v ~super_(v)
-                | kw("yield") command_args:v ~yield_(v)
-                | primary(strict):c command_args:a &{ command_candidate?(c, false) } (s cmd_brace_block)?:b { c.as_command(a,b) }
+command(strict, no_do) = primary(strict, no_do):t s dot_or_colon - operation2:n command_args(no_do):a s cmd_brace_block:b ~obj_send(t,n,a,b)
+                | primary(strict, no_do):t s dot_or_colon - operation2:n command_args(no_do):a ~obj_send(t,n,a,nil)
+                | operation:op command_args(no_do):a (s cmd_brace_block)?:b ~local_send(op,a,b)
+                | kw("super") command_args(no_do):v ~super_(v)
+                | kw("yield") command_args(no_do):v ~yield_(v)
+                | primary(strict, no_do):c command_args(no_do):a &{ command_candidate?(c, false) } (s cmd_brace_block)?:b { c.as_command(a,b) }
 
 mlhs = "(" - mlhs:i - ")" { [i] }
      | mlhs_head:l - mlhs_item:i { l + [i] }
@@ -264,20 +261,19 @@ mlhs_head = mlhs_head:l - mlhs_item:i - "," { l + [i] }
           | mlhs_item:i - "," { [i] }
 
 mlhs_item = "(" - mlhs:i - ")" { i }
-          | mlhs_node:i { i }
+          | mlhs_node(false):i { i }
 
-mlhs_node = primary(false):t &{ command_candidate?(t, true) } ~t
+mlhs_node(no_do) = primary(false, no_do):t &{ command_candidate?(t, true) } ~t
           | "::" - constant:c ~toplevel_constant(c)
-          | backref
           | variable
 
-lhs = mlhs_node
+lhs(no_do) = mlhs_node(no_do)
 
 cname = identifier
       | constant
 
 cpath = "::" - cname:c ~toplevel_constant(c)
-      | primary(false):v &{ AST::ScopedConstant === v } ~v
+      | primary(false, false):v &{ AST::ScopedConstant === v } ~v
       | cname:c ~constant_access(c)
 
 fname = fid
@@ -352,50 +348,49 @@ op_asgn = < "**="
 %% op_assign_1 = ast OpAssign1(target,index,op,value)
 %% op_assign_2 = ast OpAssign2(target,name,op,value)
 
-arg(strict) = arg(strict):l s ".." { p :range } !"." - arg(false):r ~range(l,r,true)
-            | arg(strict):l s "..." - arg(false):r ~range(l,r,false)
-            | arg(strict):l s "+" &debug !"=" - arg(false):r ~plus(l,r)
-            | arg(strict):l s "-" !"=" - arg(false):r ~minus(l,r)
-            | arg(strict):l s "*" !"*" !"=" - arg(false):r ~mult(l,r)
-            | arg(strict):l s "/" !"=" - arg(false):r ~div(l,r)
-            | arg(strict):l s "%" !"=" - arg(false):r ~mod(l,r)
-            | "-" - integer:l s "**" - arg(false):r
-            | "-" - float:l s "**" - arg(false):r
-            | "+" - arg(false):v ~unary_plus(v)
-            | "-" - arg(false):v ~unary_minus(v)
-            | arg(strict):l s "**" !"=" - arg(false):r ~pow(l,r)
-            | arg(strict):l s "|" !"|" !"=" - arg(false):r ~bit_or(l,r)
-            | arg(strict):l s "^" !"=" - arg(false):r ~bit_xor(l,r)
-            | arg(strict):l s "&" !"&" !"=" - arg(false):r ~bit_and(l,r)
-            | arg(strict):l s "<=>" - arg(false):r
-            | arg(strict):l s ">" !"=" !">" - arg(false):r
-            | arg(strict):l s ">=" - arg(false):r
-            | arg(strict):l s "<" !"=" !"<" - arg(false):r
-            | arg(strict):l s "<=" !">" - arg(false):r
-            | arg(strict):l s "==" !"=" - arg(false):r
-            | arg(strict):l s "===" - arg(false):r
-            | arg(strict):l s "!=" - arg(false):r
-            | arg(strict):l s "=~" - arg(false):r
-            | arg(strict):l s "!~" - arg(false):r
-            | "!" - arg(false):v ~logical_not(v)
-            | "~" - arg(false):v ~bit_not(v)
-            | arg(strict):l s "<<" !"=" - arg(false):r ~lshift(l,r)
-            | arg(strict):l s ">>" !"=" - arg(false):r ~rshift(l,r)
-            | arg(strict):l s "&&" !"=" - arg(false):r ~logical_and(l,r)
-            | arg(strict):l s "||" !"=" - arg(false):r ~logical_or(l,r)
-            | kw("defined?") - arg(false):v ~defined_(v)
-            | arg(strict):c s "?" - arg(false):t - ":" - arg(false):f ~ternary(c,t,f)
-            | lhs:l s "=" !"=" !">" !"~" - arg(false):v s kw("rescue") - arg(false):r ~assign(l,recover(v,r))
-            | lhs:l s "=" !"=" !">" !"~" - arg(false):v ~assign(l,v)
-            | variable:l s op_asgn:o - arg(false):v ~op_assign_0(l,o,v)
-            | primary(strict):t "[" - aref_args:i - "]" s op_asgn:o - arg(false):v ~op_assign_1(t,i,o,v)
-            | primary(strict):t s "." - word:n s op_asgn:o - arg(false):v ~op_assign_2(t,n,o,v)
-            | (primary(strict):t s "::" - constant:c ~scoped_constant(t,c)):c s op_asgn:o - arg(false):v ~constant_assignment(c,o,v)
-            | primary(strict):t s "::" - identifier:n s op_asgn:o - arg(false):v ~op_assign_2(t,n,o,v)
-            | ("::" - constant:c ~toplevel_constant(c)):c s op_asgn:o - arg(false):v ~constant_assignment(c,o,v)
-            | primary(strict):t &{ command_candidate?(t, true) } s op_asgn:o - arg(false):v ~op_assign_0(t,o,v)
-            | backref s op_asgn - arg(false)
-            | primary(strict)
+arg(strict, no_do) = arg(strict, no_do):l s ".." !"." - arg(false, no_do):r ~range(l,r,true)
+            | arg(strict, no_do):l s "..." - arg(false, no_do):r ~range(l,r,false)
+            | arg(strict, no_do):l s "+" !"=" - arg(false, no_do):r ~plus(l,r)
+            | arg(strict, no_do):l s "-" !"=" - arg(false, no_do):r ~minus(l,r)
+            | arg(strict, no_do):l s "*" !"*" !"=" - arg(false, no_do):r ~mult(l,r)
+            | arg(strict, no_do):l s "/" !"=" - arg(false, no_do):r ~div(l,r)
+            | arg(strict, no_do):l s "%" !"=" - arg(false, no_do):r ~mod(l,r)
+            | !{ strict } "-" - integer:l s "**" - arg(false, no_do):r
+            | !{ strict } "-" - float:l s "**" - arg(false, no_do):r
+            | !{ strict } "+" - arg(false, no_do):v ~unary_plus(v)
+            | !{ strict } "-" - arg(false, no_do):v ~unary_minus(v)
+            | arg(strict, no_do):l s "**" !"=" - arg(false, no_do):r ~pow(l,r)
+            | arg(strict, no_do):l s "|" !"|" !"=" - arg(false, no_do):r ~bit_or(l,r)
+            | arg(strict, no_do):l s "^" !"=" - arg(false, no_do):r ~bit_xor(l,r)
+            | arg(strict, no_do):l s "&" !"&" !"=" - arg(false, no_do):r ~bit_and(l,r)
+            | arg(strict, no_do):l s "<=>" - arg(false, no_do):r
+            | arg(strict, no_do):l s ">" !"=" !">" - arg(false, no_do):r
+            | arg(strict, no_do):l s ">=" - arg(false, no_do):r
+            | arg(strict, no_do):l s "<" !"=" !"<" - arg(false, no_do):r
+            | arg(strict, no_do):l s "<=" !">" - arg(false, no_do):r
+            | arg(strict, no_do):l s "==" !"=" - arg(false, no_do):r
+            | arg(strict, no_do):l s "===" - arg(false, no_do):r
+            | arg(strict, no_do):l s "!=" - arg(false, no_do):r
+            | arg(strict, no_do):l s "=~" - arg(false, no_do):r
+            | arg(strict, no_do):l s "!~" - arg(false, no_do):r
+            | "!" - arg(false, no_do):v ~logical_not(v)
+            | "~" - arg(false, no_do):v ~bit_not(v)
+            | arg(strict, no_do):l s "<<" !"=" - arg(false, no_do):r ~lshift(l,r)
+            | arg(strict, no_do):l s ">>" !"=" - arg(false, no_do):r ~rshift(l,r)
+            | arg(strict, no_do):l s "&&" !"=" - arg(false, no_do):r ~logical_and(l,r)
+            | arg(strict, no_do):l s "||" !"=" - arg(false, no_do):r ~logical_or(l,r)
+            | kw("defined?") - arg(false, no_do):v ~defined_(v)
+            | arg(strict, no_do):c s "?" - arg(false, no_do):t - ":" - arg(false, no_do):f ~ternary(c,t,f)
+            | lhs(no_do):l s "=" !"=" !">" !"~" - arg(false, no_do):v s kw("rescue") - arg(false, no_do):r ~assign(l,recover(v,r))
+            | lhs(no_do):l s "=" !"=" !">" !"~" - arg(false, no_do):v ~assign(l,v)
+            | variable:l s op_asgn:o - arg(false, no_do):v ~op_assign_0(l,o,v)
+            | primary(strict, no_do):t "[" - aref_args:i - "]" s op_asgn:o - arg(false, no_do):v ~op_assign_1(t,i,o,v)
+            | primary(strict, no_do):t s "." - word:n s op_asgn:o - arg(false, no_do):v ~op_assign_2(t,n,o,v)
+            | (primary(strict, no_do):t s "::" - constant:c ~scoped_constant(t,c)):c s op_asgn:o - arg(false, no_do):v ~constant_assignment(c,o,v)
+            | primary(strict, no_do):t s "::" - identifier:n s op_asgn:o - arg(false, no_do):v ~op_assign_2(t,n,o,v)
+            | ("::" - constant:c ~toplevel_constant(c)):c s op_asgn:o - arg(false, no_do):v ~constant_assignment(c,o,v)
+            | primary(strict, no_do):t &{ command_candidate?(t, true) } s op_asgn:o - arg(false, no_do):v ~op_assign_0(t,o,v)
+            | primary(strict, no_do)
 
 %% hash = ast Hash(elements)
 %% array = ast Array(elements)
@@ -411,58 +406,42 @@ arg(strict) = arg(strict):l s ".." { p :range } !"." - arg(false):r ~range(l,r,t
 %% splat = ast Splat(value)
 %% amplify = ast Amplify(value)
 
-aref_args = command(false):v (- newline)? { [v] }
-          | "*" arg(false):s (- newline)? ~splat(s)
-          | assocs(false):l (- ",")? { l }
-          | args(false):l - "," - "*" arg(false):s (- newline)? { l + splat(s) }
-          | args(false):l (- ",")? { l }
+aref_args = assocs(false, false):l (- ",")? { l }
+          | "*" arg(false, false):s ~splat(s)
+          | command(false, false):v { [v] }
+          | args(false, false):l - "," - "*" arg(false, false):s { l + splat(s) }
+          | args(false, false):l (- ",")? { l }
           | none { [] }
 
 paren_args = "(" - ")" { [] }
-           | "(" - call_args(false):a - newline? - ")" { a }
-           | "(" - block_call(false):b - newline? - ")" { [b] }
-           | "(" - args(false):a - "," - block_call(false):b - newline? - ")" { a + [b] }
+           | "(" - call_args(false, false):a - ")" { a }
+           | "(" - block_call(false):b - ")" { [b] }
+           | "(" - args(false, false):a - "," - block_call(false):b - ")" { a + [b] }
 
-loose_call_args = !kw("if") !kw("unless") !kw("while") !kw("until") call_args(true):a ~a
-call_args(strict) = command(strict):c { [c] }
-                  | args(strict):a - "," - assocs(false):h - "," - "*" arg(false):s opt_block_arg:b { a + [hash(h), splat(s)] + b }
-                  | args(strict):a - "," - assocs(false):h opt_block_arg:b { a + [hash(h)] + b }
-                  | args(strict):a - "," - "*" arg(false):s opt_block_arg:b { a + [splat(s)] + b }
-                  | args(strict):a opt_block_arg:b { a + b }
-                  | assocs(strict):h - "," - "*" arg(false):s opt_block_arg:b { [hash(h), splat(s)] + b }
-                  | assocs(strict):h opt_block_arg:b { [hash(h)] + b }
-                  | "*" arg(false):s opt_block_arg:b { [splat(s)] + b }
-                  | block_arg:b { [b] }
-
-
-call_args2 = arg(false):v - "," - args(false):a opt_block_arg:b { [v] + a + b }
-           | arg(false):v - "," - block_arg:b { [v,b] }
-           | arg(false):v - "," - "*" arg(false):s opt_block_arg:b { [v,splat(s)] + b }
-           | arg(false):v - "," - args(false):a - "," - "*" arg(false):s opt_block_arg:b { [v] + a + [splat(s)] + b }
-           | assocs(false):h - "," - "*" arg(false):s opt_block_arg:b { [hash(h),splat(s)] + b }
-           | assocs(false):h opt_block_arg:b { [hash(h)] + b }
-           | arg(false):v - "," - args(false):a - "," - assocs(false):h - "," - "*" arg(false):s opt_block_arg:b { [v]+a+[hash(h),splat(s)] + b }
-           | arg(false):v - "," - args(false):a - "," - assocs(false):h opt_block_arg:b { [v]+a+[hash(h)] + b }
-           | arg(false):v - "," - assocs(false):h - "," - "*" arg(false):s opt_block_arg:b { [v,hash(h),splat(s)] + b }
-           | arg(false):v - "," - assocs(false):h opt_block_arg:b { [v,hash(h)] + b }
-           | "*" arg(false):s opt_block_arg:b { [splat(s)] + b }
-           | block_arg:b { [b] }
-
-command_args = "(" - call_args2:a - ")" { a }
-             | "(" - ")" { [] }
-             | sp loose_call_args:a { a }
+loose_call_args(no_do) = !kw("if") !kw("unless") !kw("while") !kw("until") call_args(true, no_do):a ~a
+call_args(strict, no_do) = command(strict, no_do):c { [c] }
+                  | args(strict, no_do):a - "," - assocs(false, no_do):h - "," - "*" arg(false, no_do):s opt_block_arg(no_do):b { a + [hash(h), splat(s)] + b }
+                  | args(strict, no_do):a - "," - assocs(false, no_do):h opt_block_arg(no_do):b { a + [hash(h)] + b }
+                  | args(strict, no_do):a - "," - "*" arg(false, no_do):s opt_block_arg(no_do):b { a + [splat(s)] + b }
+                  | assocs(strict, no_do):h - "," - "*" arg(false, no_do):s opt_block_arg(no_do):b { [hash(h), splat(s)] + b }
+                  | assocs(strict, no_do):h opt_block_arg(no_do):b { [hash(h)] + b }
+                  | args(strict, no_do):a opt_block_arg(no_do):b { a + b }
+                  | "*" arg(false, no_do):s opt_block_arg(no_do):b { [splat(s)] + b }
+                  | block_arg(no_do):b { [b] }
 
 
-block_arg = "&" - arg(false):v ~amplify(v)
-opt_block_arg = - "," - block_arg:v { [v] }
+command_args(no_do) = sp loose_call_args(no_do):a { a }
+
+block_arg(no_do) = "&" - arg(false, no_do):v ~amplify(v)
+opt_block_arg(no_do) = - "," - block_arg(no_do):v { [v] }
               | none { [] }
 
-args(strict) = args(strict):l - "," - arg(false):v { l + [v] }
-             | arg(strict):v { [v] }
+args(strict, no_do) = args(strict, no_do):l - "," - arg(false, no_do):v { l + [v] }
+             | arg(strict, no_do):v { [v] }
 
-mrhs = args(false):l &{ l.size > 1 } { l }
-     | args(false):l s "," - "*" arg(false):v { l + [splat(v)] }
-     | "*" arg(false):v { [splat(v)] }
+mrhs = args(false, false):l &{ l.size > 1 } { l }
+     | args(false, false):l s "," - "*" arg(false, false):v { l + [splat(v)] }
+     | "*" arg(false, false):v { [splat(v)] }
 
 %% method_ = ast Method(obj,name,args,body)
 %% if_ = ast If(parts)
@@ -484,48 +463,47 @@ mrhs = args(false):l &{ l.size > 1 } { l }
 
 %% fid = ast Fid(s)
 
-primary(strict) = primary(strict):t s "::" - constant:c ~scoped_constant(t,c)
-                | primary(strict):t "[" - aref_args:a - "]" ~obj_send(t, "[]", a, nil)
-                | primary(strict):t s dot_or_colon - operation2:n paren_args:a s brace_block:b ~obj_send(t,n,a,b)
-                | primary(strict):t s dot_or_colon - operation2:n s brace_block:b ~obj_send(t,n,nil,b)
-                | primary(strict):t s dot_or_colon - operation2:n paren_args:a ~obj_send(t,n,a,nil)
-                | primary(strict):t s dot_or_colon - operation3:n ~obj_send(t,n,nil,nil)
-                | operation:n paren_args:a s brace_block:b ~local_send(n,a,b)
+primary(strict, no_do) = primary(strict, no_do):t s "::" - constant:c ~scoped_constant(t,c)
+                | primary(strict, no_do):t "[" - aref_args:a - "]" ~obj_send(t, "[]", a, nil)
+                | primary(strict, no_do):t s dot_or_colon - operation2:n paren_args:a s brace_block(no_do):b ~obj_send(t,n,a,b)
+                | primary(strict, no_do):t s dot_or_colon - operation2:n s brace_block(no_do):b ~obj_send(t,n,nil,b)
+                | primary(strict, no_do):t s dot_or_colon - operation2:n paren_args:a ~obj_send(t,n,a,nil)
+                | primary(strict, no_do):t s dot_or_colon - operation3:n ~obj_send(t,n,nil,nil)
+                | operation:n paren_args:a s brace_block(no_do):b ~local_send(n,a,b)
                 | operation:n paren_args:a ~local_send(n,a,nil)
-                | kw("super") paren_args:v s brace_block:b
-                | kw("super") s brace_block:b
+                | kw("super") paren_args:v s brace_block(no_do):b
+                | kw("super") s brace_block(no_do):b
                 | kw("super") paren_args:v ~super_(v)
                 | kw("super") ~super_(nil)
-                | operation:n s brace_block:b ~local_send(n,[],b)
+                | operation:n s brace_block(no_do):b ~local_send(n,[],b)
                 | literal
                 | strings(strict)
                 | xstring
                 | regexp(strict)
                 | words
                 | qwords
-                | backref
                 | fid:n ~local_send(n,nil,nil)
                 | variable
                 | kw("begin") - block_body:b - kw("end") { b } ~statements(b)
-                | "(" - expr(false):e - newline? - ")" { e }
+                | "(" - expr(false, false):e - ")" { e }
                 | "(" - statements:s - ")" ~statements(s)
                 | "::" - constant:c ~toplevel_constant(c)
                 | "[" - aref_args:a - "]" ~array(a)
                 | "{" - assoc_list:l - "}" ~hash(l)
                 | kw("return") ~return_(nil)
-                | kw("yield") s "(" - call_args(false):v - ")" ~yield_(v)
+                | kw("yield") s "(" - call_args(false, false):v - ")" ~yield_(v)
                 | kw("yield") s "(" - ")" ~yield_(nil)
                 | kw("yield") ~yield_(nil)
-                | kw("defined?") - "(" - expr(false):v - ")" ~defined_(v)
-                | kw("if") - expr(false):e then - statements:s - if_tail:l - kw("end") { if_([maybe(e,s)] + l) }
-                | kw("unless") - expr(false):e then - statements:s - else_clause?:f - kw("end") ~unless_(e,s,f)
-                | kw("while") - expr(false):e - statements:s - kw("end") ~while_(e,s)
-                | kw("until") - expr(false):e - statements:s - kw("end") ~until_(e,s)
+                | kw("defined?") - "(" - expr(false, false):v - ")" ~defined_(v)
+                | kw("if") - expr(false, no_do):e s then - statements:s - if_tail(no_do):l - kw("end") { if_([maybe(e,s)] + l) }
+                | kw("unless") - expr(false, no_do):e s then - statements:s - else_clause?:f - kw("end") ~unless_(e,s,f)
+                | kw("while") - expr(false, true):e s do - statements:s - kw("end") ~while_(e,s)
+                | kw("until") - expr(false, true):e s do - statements:s - kw("end") ~until_(e,s)
                 | kw("case") opt_terms - case_body:b - kw("end") ~case_(nil,b)
-                | kw("case") - expr(false):e opt_terms - case_body:b - kw("end") ~case_(e,b)
-                | kw("for") - for_var - kw("in") - expr(false) do - statements - kw("end")
+                | kw("case") - expr(false, no_do):e opt_terms - case_body:b - kw("end") ~case_(e,b)
+                | kw("for") - for_var - kw("in") - expr(false, no_do) s do - statements - kw("end")
                 | kw("class") - cpath:n superclass:s - block_body:b - kw("end") ~class_(n,s,b)
-                | kw("class") - "<<" - expr(false) term:e - block_body:b - kw("end") ~singleton_class(e,b)
+                | kw("class") - "<<" - expr(false, no_do) term:e - block_body:b - kw("end") ~singleton_class(e,b)
                 | kw("module") - cpath:n - block_body:b - kw("end") ~module_(n,b)
                 | kw("def") - fname:n s f_arglist:a - block_body:b - kw("end") ~method_(nil,n,a,b)
                 | kw("def") - singleton:o s dot_or_colon - fname:n s f_arglist:a - block_body:b - kw("end") ~method_(o,n,a,b)
@@ -544,29 +522,29 @@ do = term
    | kw("do")
 
 %% maybe = ast Maybe(cond, value)
-if_tail = kw("elsif") - expr(false):c then - statements:s - if_tail:l { [maybe(c,s)] + l }
+if_tail(no_do) = kw("elsif") - expr(false, no_do):c s then - statements:s - if_tail(no_do):l { [maybe(c,s)] + l }
         | else_clause:e { [e] }
         | none { [] }
 
 %% else_ = ast Else(value)
 else_clause = kw("else") - statements:s ~else_(s)
 
-for_var = lhs
+for_var = lhs(false)
         | mlhs
 
 block_par = block_par:l - "," - mlhs_item:i { l + [[:lhs, i]] }
           | mlhs_item:i { [[:lhs, i]] }
 
-block_var = block_par:l - "," - "&" - lhs:b { l + [[:block, b]] }
-          | block_par:l - "," - splat_lhs:s - "," - "&" - lhs:b { l + [[:rest, s], [:block, b]] }
+block_var = block_par:l - "," - "&" - lhs(false):b { l + [[:block, b]] }
+          | block_par:l - "," - splat_lhs:s - "," - "&" - lhs(false):b { l + [[:rest, s], [:block, b]] }
           | block_par:l - "," - splat_lhs:s { l + [[:rest, s]] }
           | block_par:l - "," { l }
           | block_par:l { l }
-          | splat_lhs:s - "," - "&" - lhs:b { [[:rest, s], [:block, b]] }
+          | splat_lhs:s - "," - "&" - lhs(false):b { [[:rest, s], [:block, b]] }
           | splat_lhs:s { [[:rest, s]] }
-          | "&" - lhs:b { [[:block, b]] }
+          | "&" - lhs(false):b { [[:block, b]] }
 
-splat_lhs = "*" - lhs:s { s }
+splat_lhs = "*" - lhs(false):s { s }
           | "*" { nil }
 
 opt_block_var = "|" - block_var?:v - "|" { v || [] }
@@ -576,35 +554,35 @@ do_block = kw("do") - opt_block_var:v - statements:b - kw("end") ~block(v,b)
 
 block_call(strict) = block_call(strict):t s dot_or_colon - operation2:n paren_args:a ~obj_send(t,n,a,nil)
                    | block_call(strict):t s dot_or_colon - operation2:n ~obj_send(t,n,[],nil)
-                   | command(strict):c s do_block:b { c.block = b; c }
+                   | command(strict, false):c s do_block:b { c.block = b; c }
 
 %% obj_send = ast ObjSend(target, name, args, block)
 %% local_send = ast LocalSend(name, args, block)
 
 
 
-brace_block = "{" - opt_block_var:v - statements:b - "}" ~block(v,b)
-            | kw("do") - opt_block_var:v - statements:b - kw("end") ~block(v,b)
+brace_block(no_do) = "{" - opt_block_var:v - statements:b - "}" ~block(v,b)
+            | !{ no_do } kw("do") - opt_block_var:v - statements:b - kw("end") ~block(v,b)
 
 %% when_ = ast When(cond, value)
-when_clause = kw("when") - when_args:a then - statements:s ~when_(a,s)
+when_clause = kw("when") - when_args:a s then - statements:s ~when_(a,s)
 
 case_body = when_clause:w - case_body:l { [w] + l }
           | when_clause:w { [w] }
           | else_clause:e { [e] }
 
-when_args = args(false):a - "," - "*" arg(false):s { a + [splat(s)] }
-          | args(false):a { a + [nil] }
-          | "*" arg(false):s { [splat(s)] }
+when_args = args(false, false):a - "," - "*" arg(false, false):s { a + [splat(s)] }
+          | args(false, false):a { a + [nil] }
+          | "*" arg(false, false):s { [splat(s)] }
 
 %% rescue_ = ast Rescue(exceptions, var, value)
-rescue_clause = kw("rescue") s exc_list:l s exc_var:v then - statements:s ~rescue_(l,v,s)
+rescue_clause = kw("rescue") s exc_list:l s exc_var:v s then - statements:s ~rescue_(l,v,s)
 
 exc_list = mrhs:l { l }
-         | arg(false):v { [v] }
+         | arg(false, false):v { [v] }
          | none { [] }
 
-exc_var = "=>" - lhs:v { v }
+exc_var = "=>" - lhs(false):v { v }
         | none { nil }
 
 %% ensure_ = ast Ensure(value)
@@ -636,7 +614,7 @@ char_escape = "\\\\" { "\\" }
 strings(strict) = string:s ~str(s)
                 | "%Q" </[^A-Za-z0-9]/> { strend = string_end(text) } qstring([strend]):s <.> &{ text == strend } ~str(s)
                 | "%q" </[^A-Za-z0-9]/> { strend = string_end(text) } lstring([strend], ["\\"]):s <.> &{ text == strend } ~str(s)
-                | "%" </[^A-Za-z0-9]/> { strend = string_end(text) } qstring([strend]):s <.> &{ text == strend } ~str(s)
+                | "%" !any_whitespace </[^A-Za-z0-9]/> { strend = string_end(text) } qstring([strend]):s <.> &{ text == strend } ~str(s)
                 | "<<" "-"?:indent heredoc_ref(indent):r { r }
 
 heredoc_ref(indent) = "'" < /[^']+/ > "'" { heredoc(text, !!indent, dstr_([]), false) }
@@ -644,7 +622,7 @@ heredoc_ref(indent) = "'" < /[^']+/ > "'" { heredoc(text, !!indent, dstr_([]), f
                     | "`" < /[^`]+/ > "`" { heredoc(text, !!indent, xstr_(dstr_([])), true) }
                     | < word > { heredoc(text, !!indent, dstr_([]), true) }
 
-string = < string:a string1:b > { a+b }
+string = < string:a s string1:b > { a+b }
        | string1
 
 string1 = "\"" qstring(["\""]):s "\"" { s }
@@ -694,7 +672,7 @@ qstring(stops) = qstring_item(stops)*:s { s }
 
 dyn_string_part = cvar:n ~variable_access(n)
                 | ivar:n ~variable_access(n)
-                | backref
+                | backref:n ~variable_access(n)
                 | gvar:n ~variable_access(n)
                 | "{" - statements:s - "}" ~statements(s)
 
@@ -736,6 +714,7 @@ variable = name:n ~variable_access(n)
          | cvar:n ~variable_access(n)
          | ivar:n ~variable_access(n)
          | gvar:n ~variable_access(n)
+         | backref:n ~variable_access(n)
          | constant:c ~constant_access(c)
          | kw("nil") ~nil_()
          | kw("self") ~self_()
@@ -744,9 +723,9 @@ variable = name:n ~variable_access(n)
          | kw("__FILE__") ~file()
          | kw("__LINE__") ~line()
 
-backref = "$" /[&`'+]|[1-9][0-9]+/
+backref = "$" /[&`'+]|[1-9][0-9]*/
 
-superclass = s "<" - expr(false):e term { e }
+superclass = s "<" - expr(false, false):e term { e }
            | term { nil }
 
 f_arglist = "(" - f_args:a - opt_nl - ")" { a }
@@ -761,15 +740,6 @@ f_args_tail = f_optarg:o - "," - f_rest_arg:s opt_f_block_arg:b { o + s + b }
 f_args = f_args_tail:l { l }
        | f_block_arg:b { [b] }
        | none { [] }
-#f_args = f_arg:a - "," - f_optarg:o - "," - f_rest_arg:s opt_f_block_arg:b { a + o + s + b }
-#       | f_arg:a - "," - f_optarg:o opt_f_block_arg:b { a + o + b }
-#       | f_arg:a - "," - f_rest_arg:s opt_f_block_arg:b { a + s + b }
-#       | f_arg:a opt_f_block_arg:b { a + b }
-#       | f_optarg:o - "," - f_rest_arg:s opt_f_block_arg:b { o + s + b }
-#       | f_optarg:o opt_f_block_arg:b { o + b }
-#       | f_rest_arg:s opt_f_block_arg:b { s + b }
-#       | f_block_arg:b { [b] }
-#       | none { [] }
 
 f_norm_arg = constant { error }
            | cvar { error }
@@ -784,11 +754,7 @@ gvar = < "$" word > { text }
      | < "$" /[0~*$?!@;,.=:<>\/\\"]/ > { text }
      | < "$-" /[A-Za-z0-9]/ > { text }
 
-#f_arg = f_arg:l - "," - f_norm_arg:n { l << [:req, n] }
-#      | f_norm_arg:n { [[:req, n]] }
-
-
-f_opt = name:n - "=" - arg(false):v { [:opt, n, v] }
+f_opt = name:n - "=" - arg(false, false):v { [:opt, n, v] }
 
 f_optarg = f_optarg:l - "," - f_opt:a { l + [a] }
          | f_opt:a { [a] }
@@ -801,16 +767,16 @@ opt_f_block_arg = - "," - f_block_arg:b { [b] }
                 | none { [] }
 
 singleton = variable:v { v }
-          | "(" - expr(false):e - opt_nl - ")" { e }
+          | "(" - expr(false, false):e - opt_nl - ")" { e }
 
-assoc_list = assocs(false):a trailer { a }
-           | args(false):a trailer { a }
+assoc_list = assocs(false, false):a trailer { a }
+           | args(false, false):a trailer { a }
            | none { [] }
 
-assocs(strict) = assocs(strict):l - "," - assoc(false):x { l + x }
-               | assoc(strict):x { x }
+assocs(strict, no_do) = assocs(strict, no_do):l - "," - assoc(false, no_do):x { l + x }
+               | assoc(strict, no_do):x { x }
 
-assoc(strict) = arg(strict):k - "=>" - arg(false):v { [k,v] }
+assoc(strict, no_do) = arg(strict, no_do):k - "=>" - arg(false, no_do):v { [k,v] }
 
 operation = fid:f { f }
           | name:i { i }
@@ -838,7 +804,7 @@ dot_or_colon = "." | "::"
 
 opt_nl = newline?
 
-%% heredoc_ = ast HereDoc(term, indent, value, dynamic)
+%% heredoc_ = ast HereDoc(stop, indent, value, dynamic)
 
 newline = < ("\r" "\n"? | "\n") > @pending_heredocs { text }
 
@@ -858,5 +824,6 @@ terms = terms s ";"
 
 none = &{ true }
 
-debug = </.{0,8}/> { p text }
+dbg = &debug(nil)
+debug(s) = </.{0,8}/> { ls = caller.map {|x| x.sub!(::Regexp.new(".*`_(.*)'$"), '\1') }.compact; ls.shift if ls.first == 'dbg'; px = ls.first; p ls; px = px+": #{s}" if s; puts "#{px}: #{text.inspect}" }
 
