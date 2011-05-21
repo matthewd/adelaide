@@ -1,19 +1,19 @@
 
 class A
-  def x
+  def x(a)
     return "foo!"
   end
-  def z
+  def z(a,b=c,*d,&e)
     return "bar!"
   end
 end
 
 class B
-  def x
+  def x(a=b)
     o = 7
     return "foo!"
   end
-  def z
+  def z(a,b=c,*d)
     return "bar!"
   end
 end

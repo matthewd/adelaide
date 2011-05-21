@@ -222,14 +222,14 @@ stmts = stmts:l terms - statement:s { l + [s] }
 
 %% big_begin = ast BigBegin(value)
 %% big_end = ast BigEnd(value)
-%% undef_ = ast Undef(names)
+%% undef_ = ast Undef(name)
 statement = statement:v s kw("if") - expr(false, false):c ~if_([maybe(c,v)])
           | statement:v s kw("unless") - expr(false, false):c ~unless_(c,v,nil)
           | statement:v s kw("while") - expr(false, false):c ~while_(c,v)
           | statement:v s kw("until") - expr(false, false):c ~until_(c,v)
           | statement:v s kw("rescue") - statement:f ~recover(v,f)
           | alias_statement:a { a }
-          | kw("undef") - undef_list:n ~undef_(n)
+          | kw("undef") - undef_list:l ~l
           | kw("BEGIN") - "{" - statements:s - "}" ~big_begin(s)
           | kw("END") - "{" - statements:s - "}" ~big_end(s)
           | lhs(false):l s "=" !"=" !">" !"~" - mrhs:v ~assign(l,v)
@@ -241,18 +241,19 @@ statement = statement:v s kw("if") - expr(false, false):c ~if_([maybe(c,v)])
           | expr(false, false):e { e }
 
 %% alias_ = ast Alias(from, to)
+%% valias = ast VAlias(from, to)
 alias_statement = kw("alias") - fitem:a - fitem:b ~alias_(a,b)
-                | kw("alias") - gvar:a - gvar:b ~alias_(a,b)
-                | kw("alias") - gvar:a - backref:b ~alias_(a,b) # FIXME: might be a n-ref, which should error
+                | kw("alias") - gvar:a - gvar:b ~valias_(a,b)
+                | kw("alias") - gvar:a - backref:b ~valias_(a,b) # FIXME: might be a n-ref, which should error
 
-%% logical_and = ast LogicalAnd(left, right)
-%% logical_or = ast LogicalOr(left, right)
-%% logical_not = ast LogicalNot(value)
-expr(strict, no_do) = expr(strict, no_do):l - kw("and") - expr2(false, no_do):r ~logical_and(l,r)
-             | expr(strict, no_do):l - kw("or") - expr2(false, no_do):r ~logical_or(l,r)
+%% and_ = ast And(left, right)
+%% or_ = ast Or(left, right)
+%% not_ = ast Not(value)
+expr(strict, no_do) = expr(strict, no_do):l - kw("and") - expr2(false, no_do):r ~and_(l,r)
+             | expr(strict, no_do):l - kw("or") - expr2(false, no_do):r ~or_(l,r)
              | expr2(strict, no_do):e { e }
-expr2(strict, no_do) = kw("not") - expr2(false, no_do):e ~logical_not(e)
-              | "!" - expr2(false, no_do):e ~logical_not(e)
+expr2(strict, no_do) = kw("not") - expr2(false, no_do):e ~not_(e)
+              | "!" - expr2(false, no_do):e ~not_(e)
               | command_call(strict, no_do):c { c }
               | arg(strict, no_do):a { a }
 
@@ -318,8 +319,8 @@ fitem = fname
       | symbol
       | dsym
 
-undef_list = undef_list - "," - fitem
-           | fitem
+undef_list = undef_list:l s "," - fitem:i { l + [undef_(i)] }
+           | fitem:i ~undef_(i)
 
 opmethod = "[]="
          | "[]"
@@ -363,12 +364,7 @@ op_asgn = < "**="
           > { text[0..-2] }
 
 %% assign = ast Assign(lhs,rhs)
-%% plus = ast Plus(left,right)
-%% minus = ast Minus(left,right)
-%% mult = ast Mult(left,right)
-%% div = ast Div(left,right)
-%% mod = ast Modulus(left,right)
-%% pow = ast Pow(left,right)
+%% binop = ast BinOp(op,left,right)
 %% range = ast Range(left,right,open)
 
 %% unary_plus = ast UnaryPlus(value)
@@ -380,71 +376,60 @@ op_asgn = < "**="
 %% op_assign_1 = ast OpAssign1(target,index,op,value)
 %% op_assign_2 = ast OpAssign2(target,name,op,value)
 
-%% less_than = ast LessThan(left, right)
-%% less_equal = ast LessEqual(left, right)
-%% greater_than = ast GreaterThan(left, right)
-%% greater_equal = ast GreaterEqual(left, right)
-%% match = ast Match(left, right)
-%% not_match = ast NotMatch(left, right)
-%% equal = ast Equal(left, right)
-%% not_equal = ast NotEqual(left, right)
-%% threequal = ast Threequal(left, right)
-%% cmp = ast Compare(left, right)
-
 arg(strict, no_do) = kw("defined?") - !"(" arg(false, no_do):v ~defined_(v)
                    | arg1(strict, no_do):c s "?" - arg(false, no_do):t - ":" - arg(false, no_do):f ~ternary(c,t,f)
                    | arg1(strict, no_do)
 
-arg1(strict, no_do) = arg2(strict, true):l s ".." !"." - arg2(false, true):r ~range(l,r,true)
-                    | arg2(strict, true):l s "..." - arg2(false, true):r ~range(l,r,false)
+arg1(strict, no_do) = arg2(strict, true):l s ".." !"." - arg2(false, true):r ~range(l,r,false)
+                    | arg2(strict, true):l s "..." - arg2(false, true):r ~range(l,r,true)
                     | arg2(strict, no_do)
 
-arg2(strict, no_do) = arg2(strict, no_do):l s "||" !"=" - arg3(false, no_do):r ~logical_or(l,r)
+arg2(strict, no_do) = arg2(strict, no_do):l s "||" !"=" - arg3(false, no_do):r { binop(:"||",l,r) }
                     | arg3(strict, no_do)
 
-arg3(strict, no_do) = arg3(strict, no_do):l s "&&" !"=" - arg4(false, no_do):r ~logical_and(l,r)
+arg3(strict, no_do) = arg3(strict, no_do):l s "&&" !"=" - arg4(false, no_do):r { binop(:"&&",l,r) }
                     | arg4(strict, no_do)
 
-arg4(strict, no_do) = arg4(strict, no_do):l s "<=>" - arg5(false, no_do):r ~cmp(l,r)
-                    | arg4(strict, no_do):l s "==" !"=" - arg5(false, no_do):r ~equal(l,r)
-                    | arg4(strict, no_do):l s "===" - arg5(false, no_do):r ~threequal(l,r)
-                    | arg4(strict, no_do):l s "!=" - arg5(false, no_do):r ~not_equal(l,r)
-                    | arg4(strict, no_do):l s "=~" - arg5(false, no_do):r ~match(l,r)
-                    | arg4(strict, no_do):l s "!~" - arg5(false, no_do):r ~not_match(l,r)
+arg4(strict, no_do) = arg4(strict, no_do):l s "<=>" - arg5(false, no_do):r { binop(:<=>,l,r) }
+                    | arg4(strict, no_do):l s "==" !"=" - arg5(false, no_do):r { binop(:==,l,r) }
+                    | arg4(strict, no_do):l s "===" - arg5(false, no_do):r { binop(:===,l,r) }
+                    | arg4(strict, no_do):l s "!=" - arg5(false, no_do):r { binop(:"!=",l,r) }
+                    | arg4(strict, no_do):l s "=~" - arg5(false, no_do):r { binop(:"=~",l,r) }
+                    | arg4(strict, no_do):l s "!~" - arg5(false, no_do):r { binop(:"!~",l,r) }
                     | arg5(strict, no_do)
 
-arg5(strict, no_do) = arg5(strict, no_do):l s ">" !"=" !">" - arg6(false, no_do):r ~greater_than(l,r)
-                    | arg5(strict, no_do):l s ">=" - arg6(false, no_do):r ~greater_equal(l,r)
-                    | arg5(strict, no_do):l s "<" !"=" !"<" - arg6(false, no_do):r ~less_than(l,r)
-                    | arg5(strict, no_do):l s "<=" !">" - arg6(false, no_do):r ~less_equal(l,r)
+arg5(strict, no_do) = arg5(strict, no_do):l s ">" !"=" !">" - arg6(false, no_do):r { binop(:>,l,r) }
+                    | arg5(strict, no_do):l s ">=" - arg6(false, no_do):r { binop(:>=,l,r) }
+                    | arg5(strict, no_do):l s "<" !"=" !"<" - arg6(false, no_do):r { binop(:<,l,r) }
+                    | arg5(strict, no_do):l s "<=" !">" - arg6(false, no_do):r { binop(:<=,l,r) }
                     | arg6(strict, no_do)
 
-arg6(strict, no_do) = arg6(strict, no_do):l s "|" !"|" !"=" - arg7(false, no_do):r ~bit_or(l,r)
-                    | arg6(strict, no_do):l s "^" !"=" - arg7(false, no_do):r ~bit_xor(l,r)
+arg6(strict, no_do) = arg6(strict, no_do):l s "|" !"|" !"=" - arg7(false, no_do):r { binop(:|,l,r) }
+                    | arg6(strict, no_do):l s "^" !"=" - arg7(false, no_do):r { binop(:^,l,r) }
                     | arg7(strict, no_do)
 
-arg7(strict, no_do) = arg7(strict, no_do):l s "&" !"&" !"=" - arg8(false, no_do):r ~bit_and(l,r)
+arg7(strict, no_do) = arg7(strict, no_do):l s "&" !"&" !"=" - arg8(false, no_do):r { binop(:&,l,r) }
                     | arg8(strict, no_do)
 
-arg8(strict, no_do) = arg8(strict, no_do):l s "<<" !"=" - arg9(false, no_do):r ~lshift(l,r)
-                    | arg8(strict, no_do):l s ">>" !"=" - arg9(false, no_do):r ~rshift(l,r)
+arg8(strict, no_do) = arg8(strict, no_do):l s "<<" !"=" - arg9(false, no_do):r { binop(:<<,l,r) }
+                    | arg8(strict, no_do):l s ">>" !"=" - arg9(false, no_do):r { binop(:>>,l,r) }
                     | arg9(strict, no_do)
 
-arg9(strict, no_do) = arg9(strict, no_do):l s "+" !"=" - arg10(false, no_do):r ~plus(l,r)
-                    | arg9(strict, no_do):l s "-" !"=" - arg10(false, no_do):r ~minus(l,r)
+arg9(strict, no_do) = arg9(strict, no_do):l s "+" !"=" - arg10(false, no_do):r { binop(:+,l,r) }
+                    | arg9(strict, no_do):l s "-" !"=" - arg10(false, no_do):r { binop(:-,l,r) }
                     | arg10(strict, no_do)
 
-arg10(strict, no_do) = arg10(strict, no_do):l s "*" !"*" !"=" - arg11(false, no_do):r ~mult(l,r)
-                     | arg10(strict, no_do):l s "/" !"=" - arg11(false, no_do):r ~div(l,r)
-                     | arg10(strict, no_do):l s "%" !"=" - arg11(false, no_do):r ~mod(l,r)
+arg10(strict, no_do) = arg10(strict, no_do):l s "*" !"*" !"=" - arg11(false, no_do):r { binop(:*,l,r) }
+                     | arg10(strict, no_do):l s "/" !"=" - arg11(false, no_do):r { binop(:/,l,r) }
+                     | arg10(strict, no_do):l s "%" !"=" - arg11(false, no_do):r { binop(:%,l,r) }
                      | arg11(strict, no_do)
 
 arg11(strict, no_do) = "-" !numeric arg11(false, no_do):v ~unary_minus(v)
                      | !{ strict } !numeric "-" - arg11(false, no_do):v ~unary_minus(v)
-                     | "-" numeric:l s "**" !"=" - arg11(false, no_do):r { unary_minus(pow(l,r)) }
+                     | "-" numeric:l s "**" !"=" - arg11(false, no_do):r { unary_minus(binop(:**,l,r)) }
                      | arg12(strict, no_do)
 
-arg12(strict, no_do) = arg13(strict, no_do):l s "**" !"=" - arg11(false, no_do):r ~pow(l,r)
+arg12(strict, no_do) = arg13(strict, no_do):l s "**" !"=" - arg11(false, no_do):r ~binop(l,r)
                      | arg13(strict, no_do)
 
 arg13(strict, no_do) = "!" - arg11(false, no_do):v ~logical_not(v)
@@ -482,7 +467,7 @@ paren_args = "(" - ")" { [] }
            | "(" - call_args(false, false):a - ")" { a }
            | "(" - block_call(false):b - ")" { [b] }
            | "(" - args(false, false):a - "," - block_call(false):b - ")" { a + [b] }
-           | s paren_args:a { a }
+           | sp paren_args:a { a }
 
 loose_call_args(no_do) = !kw("if") !kw("unless") !kw("while") !kw("until") call_args(true, no_do):a ~a
 call_args(strict, no_do) = &{false} # command(strict, no_do):c { [c] }
@@ -525,7 +510,7 @@ mrhs = args(false, false):l &{ l.size > 1 } { l }
 
 %% statements = ast Statements(value)
 
-%% class_ = ast Class(name, parent, body)
+%% class_ = ast Class(name, superclass, body)
 %% singleton_class = ast SingletonClass(value, body)
 %% module_ = ast Module(name, body)
 
@@ -771,7 +756,7 @@ integer = "-"?:neg "0" ("x" | "X") < /[0-9A-Fa-f]+/ ("_" /[0-9A-Fa-f]+/)* > { n 
         | "-"?:neg "0" ("b" | "B") < /[0-1]+/ ("_" /[0-1]+/)* > { n = text.gsub('_','').to_i(8); integer(neg ? -n : n) }
         | "-"?:neg "0" ("o" | "O")? < /[0-7]+/ ("_" /[0-7]+/)* > { n = text.gsub('_','').to_i(2); integer(neg ? -n : n) }
         | "0" { integer(0) }
-        | < /-?[1-9][0-9]*/ ("_" /[0-9]+/)* > { n = text.gsub('_','').to_i(10) }
+        | < /-?[1-9][0-9]*/ ("_" /[0-9]+/)* > { integer(text.gsub('_','').to_i(10)) }
 
 %% float = ast Float(value)
          float = < /-?[0-9]+/ ("_" /[0-9]+/)* (/\.[0-9]+/ ("_" /[0-9]+/)* float_exponent? | float_exponent) > { float(text.gsub('_','').to_f) }
@@ -832,8 +817,8 @@ f_opt = name:n - "=" - arg(false, false):v { [:opt, n, v] }
 f_optarg = f_optarg:l - "," - f_opt:a { l + [a] }
          | f_opt:a { [a] }
 
-f_rest_arg = "*" name:n { [:rest, n] }
-           | "*" { [:rest] }
+f_rest_arg = "*" name:n { [[:rest, n]] }
+           | "*" { [[:rest]] }
 
 f_block_arg = "&" name:n { [:block, n] }
 opt_f_block_arg = - "," - f_block_arg:b { [b] }
