@@ -2,8 +2,7 @@ module Adelaide; end
 
 require 'adelaide.kpeg.rb'
 
-ARGF.read.each do |fn|
-  fn.chomp!
+ARGF.read.split(/\n/).each do |fn|
   puts fn
   pp = Adelaide::Parser.new(File.read(fn))
   unless pp.parse
