@@ -8,5 +8,8 @@ unless pp.parse
   pp.raise_error
 end
 
-Rubinius::AST::AsciiGrapher.new(pp.ast, Adelaide::Parser::AST::Node).print
+script = Rubinius::AST::Script.new(pp.ast)
+
+#Rubinius::AST::AsciiGrapher.new(script, Adelaide::Parser::AST::Node).print
+Rubinius::AST::AsciiGrapher.new(script, Rubinius::AST::Node).print
 
