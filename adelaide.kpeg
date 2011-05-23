@@ -176,6 +176,12 @@
       true
     when AST::Return
       candidate.value.nil?
+    when AST::Next
+      candidate.value.nil?
+    when AST::Break
+      candidate.value.nil?
+    when AST::Yield
+      candidate.value.nil?
     else
       false
     end
@@ -199,7 +205,7 @@
       end
       x.block = block
       x
-    when AST::Return
+    when AST::Return, AST::Next, AST::Break, AST::Yield
       call.value = AST::ArrayLiteral === args && args.body.size == 1 ? args.body.first : args
       call
     else
@@ -240,6 +246,9 @@
       AST::LocalVariableAssignment.new(line, lhs.name, rhs)
     when AST::ConstantAccess
       rhs = binop(line, op, lhs.dup, rhs) if op
+      AST::ConstantAssignment.new(line, lhs, rhs)
+    when AST::ToplevelConstant, AST::ScopedConstant
+      return nil if op
       AST::ConstantAssignment.new(line, lhs, rhs)
     when AST::InstanceVariableAccess
       rhs = binop(line, op, lhs, rhs) if op
@@ -313,11 +322,11 @@ stmts = stmts:l terms - statement:s { l + [s] }
 
 statement = statement:v s { line = lineno } kw("if") - expr(Cx.new):c { AST::If.new(lineno, c, v, nil) }
           | statement:v s { line = lineno } kw("unless") - expr(Cx.new):c { AST::If.new(lineno, c, nil, v) }
-          | statement:v s { line = lineno } kw("while") - expr(Cx.new):c { AST::While.new(lineno, c, v, true) }
-          | statement:v s { line = lineno } kw("until") - expr(Cx.new):c { AST::Until.new(lineno, c, v, true) }
+          | statement:v s { line = lineno } kw("while") - expr(Cx.new):c { AST::While.new(lineno, c, v, !(AST::Begin === v)) }
+          | statement:v s { line = lineno } kw("until") - expr(Cx.new):c { AST::Until.new(lineno, c, v, !(AST::Begin === v)) }
           | statement:v s { line = lineno } kw("rescue") - statement:f { AST::Rescue.new(line, v, AST::RescueCondition.new(line, nil, f, nil)) }
           | alias_statement:a { a }
-          | { line = lineno } kw("undef") - undef_list(lineno):l { l }
+          | { line = lineno } kw("undef") - undef_list(lineno):l { l.size == 1 ? l.first : AST::Block.new(line, l) }
           | { line = lineno } kw("BEGIN") - "{" - statements:s - "}"
           | { line = lineno } kw("END") - "{" - statements:s - "}"
           | { line = lineno } lhs(Cx.new):l s "=" !"=" !">" !"~" - mrhs:v { set_rhs(l, v) }
@@ -329,8 +338,8 @@ statement = statement:v s { line = lineno } kw("if") - expr(Cx.new):c { AST::If.
           | expr(Cx.new):e { e }
 
 alias_statement = { line = lineno } kw("alias") - fitem:a - fitem:b { AST::Alias.new(lineno, a, b) }
-                | { line = lineno } kw("alias") - gvar:a - gvar:b { AST::VAlias.new(lineno, a, b) }
-                | { line = lineno } kw("alias") - gvar:a - backref:b { AST::VAlias.new(lineno, a, b) } # FIXME: might be a n-ref, which should error
+                | { line = lineno } kw("alias") - gvar:a - gvar:b { AST::VAlias.new(lineno, AST::SymbolLiteral.new(lineno, a.to_sym), AST::SymbolLiteral.new(lineno, b.to_sym)) }
+                | { line = lineno } kw("alias") - gvar:a - backref:b { AST::VAlias.new(lineno, AST::SymbolLiteral.new(lineno, a.to_sym), AST::SymbolLiteral.new(lineno, b.to_sym)) } # FIXME: might be a n-ref, which should error
 
 expr(cx) = { line = lineno } expr2(cx):l - kw("and") - expr(cx.right):r { AST::And.new(lineno,l,r) }
          | { line = lineno } expr2(cx):l - kw("or") - expr(cx.right):r { AST::Or.new(lineno,l,r) }
@@ -392,7 +401,7 @@ fitem = { line = lineno } fname:n { AST::SymbolLiteral.new(line, n) }
       | dsym
 
 undef_list(line) = undef_list(line):l s "," - fitem:i { l + [AST::Undef.new(line, i)] }
-                 | fitem:i { AST::Undef.new(line, i) }
+                 | fitem:i { [AST::Undef.new(line, i)] }
 
 opmethod = "[]="
          | "[]"
