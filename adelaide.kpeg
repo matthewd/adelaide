@@ -8,12 +8,13 @@
 
   attr_accessor :ast
   attr_accessor :line_offset
-  def lineno; current_line + (@line_offset || 0); end
+  def lineno; @lines[pos] ||= current_line + (@line_offset || 0); end
 
   attr_accessor :heredocs
 
   def setup
     @heredocs = []
+    @lines = {}
   end
 
   SPACES = ["\t", "\n", "\v", "\f", "\r", ' ', "\r\n"]
@@ -25,6 +26,55 @@
     when '<'; '>'
     when '{'; '}'
     else; c
+    end
+  end
+
+  class Cx
+    def self.strict; new.strict; end
+    def self.no_do; new.no_do; end
+
+    def initialize
+      @strict = false
+      @no_do = false
+    end
+
+    def strict?; @strict; end
+    def no_do?; @no_do; end
+
+    def strict; with(:strict); end
+    def no_do; with(:no_do); end
+
+    def with(t)
+      x = dup
+      x.instance_variable_set(:"@#{t}", true)
+      x
+    end
+
+    def unstrict; without(:strict); end
+    def unno_do; without(:no_do); end
+
+    def without(t)
+      x = dup
+      x.instance_variable_set(:"@#{t}", false)
+      x
+    end
+
+    def left
+      self
+    end
+    def right
+      unstrict
+    end
+
+    def eql?(other)
+      other.strict? == strict? &&
+        other.no_do? == no_do?
+    end
+    def hash
+      n = 1
+      n <<= 1; n |= 1 if strict?
+      n <<= 1; n |= 1 if no_do?
+      n
     end
   end
 
@@ -249,66 +299,66 @@ sp = (hspace | comment | escaped_newline)+
 s = (hspace | comment | escaped_newline)*
 
 
-root = { line = lineno } { setup } rd_doc* program:r - eof { @ast = deblockify(r) }
+root = { setup } { line = lineno } rd_doc* program:r - eof { @ast = deblockify(r) }
 program = statements
 
 statements = - { line = lineno } stmts:s opt_terms { AST::Block.new(line, s) }
 
-block_body = { l1 = lineno } statements:b - { l2 = lineno } (- rescue_clause)*:rescs - else_clause?:els - { l3 = lineno } ensure_clause?:ens
-               { b = AST::Rescue.new(l2, b, rescs, els) if rescs.size > 0 || els; b = AST::Ensure.new(l3, b, ens) if ens; b = AST::Begin.new(l1, b) if rescs.size > 0 || els || ens; b }
+block_body = { l1 = lineno } statements:b - { l2 = lineno } (- rescue_clause)?:resc - else_clause?:els - { l3 = lineno } ensure_clause?:ens
+               { b = AST::Rescue.new(l2, deblockify(b), resc, els) if resc || els; b = AST::Ensure.new(l3, deblockify(b), ens) if ens; b = AST::Block.new(l1, [b]) unless AST::Block === b; b }
 
 stmts = stmts:l terms - statement:s { l + [s] }
       | statement:s { [s] }
       | none { [] }
 
-statement = statement:v s { line = lineno } kw("if") - expr(false, false):c { AST::If.new(lineno, c, v, nil) }
-          | statement:v s { line = lineno } kw("unless") - expr(false, false):c { AST::If.new(lineno, c, nil, v) }
-          | statement:v s { line = lineno } kw("while") - expr(false, false):c { AST::While.new(lineno, c, v, true) }
-          | statement:v s { line = lineno } kw("until") - expr(false, false):c { AST::Until.new(lineno, c, v, true) }
+statement = statement:v s { line = lineno } kw("if") - expr(Cx.new):c { AST::If.new(lineno, c, v, nil) }
+          | statement:v s { line = lineno } kw("unless") - expr(Cx.new):c { AST::If.new(lineno, c, nil, v) }
+          | statement:v s { line = lineno } kw("while") - expr(Cx.new):c { AST::While.new(lineno, c, v, true) }
+          | statement:v s { line = lineno } kw("until") - expr(Cx.new):c { AST::Until.new(lineno, c, v, true) }
           | statement:v s { line = lineno } kw("rescue") - statement:f { AST::Rescue.new(line, v, AST::RescueCondition.new(line, nil, f, nil)) }
           | alias_statement:a { a }
           | { line = lineno } kw("undef") - undef_list(lineno):l { l }
           | { line = lineno } kw("BEGIN") - "{" - statements:s - "}"
           | { line = lineno } kw("END") - "{" - statements:s - "}"
-          | { line = lineno } lhs(false):l s "=" !"=" !">" !"~" - mrhs:v { set_rhs(l, v) }
+          | { line = lineno } lhs(Cx.new):l s "=" !"=" !">" !"~" - mrhs:v { set_rhs(l, v) }
           | { line = lineno } mlhs:l s "=" !"=" !">" !"~" - mrhs:v { set_rhs(l, v) }
-          | { line = lineno } lhs(false):l s "=" !"=" !">" !"~" - command_call(false, false):v { set_rhs(l, v) }
-          | { line = lineno } mlhs:l s "=" !"=" !">" !"~" - command_call(false, false):v { set_rhs(l, v) }
-          | { line = lineno } mlhs:l s "=" !"=" !">" !"~" - arg(false, false):v { set_rhs(l, v) }
-          | { line = lineno } primary(false, false):t s op_asgn:o - command_call(false, false):v &{ x = to_assign(line,t,v,o) } { x }
-          | expr(false, false):e { e }
+          | { line = lineno } lhs(Cx.new):l s "=" !"=" !">" !"~" - command_call(Cx.new):v { set_rhs(l, v) }
+          | { line = lineno } mlhs:l s "=" !"=" !">" !"~" - command_call(Cx.new):v { set_rhs(l, AST::ToArray.new(line, v)) }
+          | { line = lineno } mlhs:l s "=" !"=" !">" !"~" - arg(Cx.new):v { set_rhs(l, AST::ToArray.new(line, v)) }
+          | { line = lineno } primary(Cx.new):t s op_asgn:o - command_call(Cx.new):v &{ x = to_assign(line,t,v,o) } { x }
+          | expr(Cx.new):e { e }
 
 alias_statement = { line = lineno } kw("alias") - fitem:a - fitem:b { AST::Alias.new(lineno, a, b) }
                 | { line = lineno } kw("alias") - gvar:a - gvar:b { AST::VAlias.new(lineno, a, b) }
                 | { line = lineno } kw("alias") - gvar:a - backref:b { AST::VAlias.new(lineno, a, b) } # FIXME: might be a n-ref, which should error
 
-expr(strict, no_do) = { line = lineno } expr(strict, no_do):l - kw("and") - expr2(false, no_do):r { AST::And.new(lineno,l,r) }
-             | { line = lineno } expr(strict, no_do):l - kw("or") - expr2(false, no_do):r { AST::Or.new(lineno,l,r) }
-             | expr2(strict, no_do):e { e }
-expr2(strict, no_do) = { line = lineno } kw("not") - expr2(false, no_do):e { AST::Not.new(lineno,e) }
-              | { line = lineno } "!" - expr2(false, no_do):e { AST::Not.new(lineno,e) }
-              | command_call(strict, no_do):c { c }
-              | arg(strict, no_do):a { a }
+expr(cx) = { line = lineno } expr2(cx):l - kw("and") - expr(cx.right):r { AST::And.new(lineno,l,r) }
+         | { line = lineno } expr2(cx):l - kw("or") - expr(cx.right):r { AST::Or.new(lineno,l,r) }
+         | expr2(cx):e { e }
+expr2(cx) = { line = lineno } kw("not") - expr2(cx.right):e { AST::Not.new(lineno,e) }
+          | { line = lineno } "!" - expr2(cx.right):e { AST::Not.new(lineno,e) }
+          | command_call(cx):c { c }
+          | arg(cx):a { a }
 
 
-command_call(strict, no_do) = !{ no_do } block_call(strict):t dot_or_colon - { line = lineno } operation2:n command_args(no_do):a { x = AST::SendWithArguments.new(line, t, n.to_sym, a[0]); x.block = a[1]; x }
-                            | !{ no_do } block_call(strict):c command_args(no_do):a &{ command_candidate?(c) } { as_command(c, a[0],a[1]) }
-                            | !{ no_do } block_call(strict):c { c }
-                            | command(strict, no_do):c { c }
-                            | kw("return") s command_call(false, no_do):v { AST::Return.new(v) }
-                            | kw("return") s loose_call_args(no_do):v &{ v[0].nil? } { AST::Return.new(v[0]) }
-                            | kw("break") s command_call(false, no_do):v { AST::Break.new(v) }
-                            | kw("break") s loose_call_args(no_do):v &{ v[0].nil? } { AST::Break.new(v[0]) }
-                            | kw("next") s command_call(false, no_do):v { AST::Next.new(v) }
-                            | kw("next") s loose_call_args(no_do):v &{ v[0].nil? } { AST::Next.new(v[0]) }
+command_call(cx) = !{ cx.no_do? } block_call(cx):t dot_or_colon - { line = lineno } operation2:n command_args(cx.right):a { x = AST::SendWithArguments.new(line, t, n.to_sym, a[0]); x.block = a[1]; x }
+                 | !{ cx.no_do? } block_call(cx):c command_args(cx.right):a &{ command_candidate?(c) } { as_command(c, a[0],a[1]) }
+                 | !{ cx.no_do? } block_call(cx):c { c }
+                 | command(cx):c { c }
+                 | kw("return") s command_call(cx.right):v { AST::Return.new(v) }
+                 | kw("return") s loose_call_args(cx.right):v &{ v[0].nil? } { AST::Return.new(v[0]) }
+                 | kw("break") s command_call(cx.right):v { AST::Break.new(v) }
+                 | kw("break") s loose_call_args(cx.right):v &{ v[0].nil? } { AST::Break.new(v[0]) }
+                 | kw("next") s command_call(cx.right):v { AST::Next.new(v) }
+                 | kw("next") s loose_call_args(cx.right):v &{ v[0].nil? } { AST::Next.new(v[0]) }
 
 
 cmd_brace_block = { line = lineno } "{" - opt_block_var:v - statements:s - "}" { AST::Iter.new(line, v, deblockify(b)) }
 
-command(strict, no_do) = &{ false }
-                | { line = lineno } kw("super") command_args(no_do):v { x = AST::Super.new(line, v[0]); x.block = v[1]; x }
-                | { line = lineno } kw("yield") command_args(no_do):v { x = AST::Yield.new(line, v[0], true); x.block = v[1]; x }
-                | primary(strict, no_do):c &{ command_candidate?(c) } command_args(no_do):a (s cmd_brace_block)?:b &{ !a[1] || !b } { as_command(c, a[0], a[1] || b) }
+command(cx) = &{ false }
+            | { line = lineno } kw("super") command_args(cx):v { x = AST::Super.new(line, v[0]); x.block = v[1]; x }
+            | { line = lineno } kw("yield") command_args(cx):v { x = AST::Yield.new(line, v[0], true); x.block = v[1]; x }
+            | primary(cx):c &{ command_candidate?(c) } command_args(cx):a (s cmd_brace_block)?:b &{ !a[1] || !b } { as_command(c, a[0], a[1] || b) }
 
 mlhs = { line = lineno } "(" - mlhs:i - ")" { i }
      | { line = lineno } mlhs_head:l - mlhs_item:i { AST::MultipleAssignment.new(line, AST::ArrayLiteral.new(line, l + [i]), nil, nil) }
@@ -320,24 +370,24 @@ mlhs_head = mlhs_head:l - mlhs_item:i - "," { l + [i] }
           | mlhs_item:i - "," { [i] }
 
 mlhs_item = "(" - mlhs:i - ")" { i }
-          | mlhs_node(false):i { i }
+          | mlhs_node(Cx.new):i { i }
 
-mlhs_node(no_do) = primary(false, no_do):t &{ x = to_assign(t.line, t) } { x }
+mlhs_node(cx) = primary(cx):t &{ x = to_assign(t.line, t) } { x }
 
-lhs(no_do) = mlhs_node(no_do)
+lhs(cx) = mlhs_node(cx)
 
 cname = identifier
       | constant
 
-cpath = primary(false, false):v &{ AST::ScopedConstant === v || AST::ToplevelConstant === v } ~v
+cpath = primary(Cx.new):v &{ AST::ScopedConstant === v || AST::ToplevelConstant === v } ~v
       | constant:c { c.to_sym }
 
 fname = fid
-      | identifier "="?
-      | constant "="?
+      | identifier:n "="?:q { q ? "#{n}=" : n }
+      | constant:n "="?:q { q ? "#{n}=" : n }
       | < opmethod > { text }
 
-fitem = fname
+fitem = { line = lineno } fname:n { AST::SymbolLiteral.new(line, n) }
       | symbol
       | dsym
 
@@ -391,162 +441,162 @@ op_asgn = "||=" { 'or' }
   end
 }
 
-arg(strict, no_do) = { line = lineno } kw("defined?") - !"(" arg(false, no_do):v ~defined_(v)
-                   | arg1(strict, no_do):c s { line = lineno } "?" - arg(false, no_do):t - ":" - arg(false, no_do):f { AST::If.new(line, c, t, f) }
-                   | arg1(strict, no_do)
+arg(cx) = { line = lineno } kw("defined?") - !"(" arg(cx.right):v ~defined_(v)
+        | arg1(cx):c s { line = lineno } "?" - arg(cx.right):t - ":" - arg(cx.right):f { AST::If.new(line, c, t, f) }
+        | arg1(cx)
 
-arg1(strict, no_do) = arg2(strict, true):l s { line = lineno } ".." !"." - arg2(false, true):r { AST::Range.new(line,l,r) }
-                    | arg2(strict, true):l s { line = lineno } "..." - arg2(false, true):r { AST::RangeExclude.new(line,l,r) }
-                    | arg2(strict, no_do)
+arg1(cx) = arg2(cx):l s { line = lineno } ".." !"." - arg2(cx.right):r { AST::Range.new(line,l,r) }
+         | arg2(cx):l s { line = lineno } "..." - arg2(cx.right):r { AST::RangeExclude.new(line,l,r) }
+         | arg2(cx)
 
-arg2(strict, no_do) = arg2(strict, no_do):l s { line = lineno } "||" !"=" - arg3(false, no_do):r { AST::Or.new(line,l,r) }
-                    | arg3(strict, no_do)
+arg2(cx) = arg2(cx):l s { line = lineno } "||" !"=" - arg3(cx.right):r { AST::Or.new(line,l,r) }
+         | arg3(cx)
 
-arg3(strict, no_do) = arg3(strict, no_do):l s { line = lineno } "&&" !"=" - arg4(false, no_do):r { AST::And.new(line,l,r) }
-                    | arg4(strict, no_do)
+arg3(cx) = arg3(cx):l s { line = lineno } "&&" !"=" - arg4(cx.right):r { AST::And.new(line,l,r) }
+         | arg4(cx)
 
-arg4(strict, no_do) = arg4(strict, no_do):l s { line = lineno } "<=>" - arg5(false, no_do):r { binop(line,:<=>,l,r) }
-                    | arg4(strict, no_do):l s { line = lineno } "==" !"=" - arg5(false, no_do):r { binop(line,:==,l,r) }
-                    | arg4(strict, no_do):l s { line = lineno } "===" - arg5(false, no_do):r { binop(line,:===,l,r) }
-                    | arg4(strict, no_do):l s { line = lineno } "!=" - arg5(false, no_do):r { binop(line,:"!=",l,r) }
-                    | arg4(strict, no_do):l s { line = lineno } "=~" - arg5(false, no_do):r { binop(line,:"=~",l,r) }
-                    | arg4(strict, no_do):l s { line = lineno } "!~" - arg5(false, no_do):r { binop(line,:"!~",l,r) }
-                    | arg5(strict, no_do)
+arg4(cx) = arg4(cx):l s { line = lineno } "<=>" - arg5(cx.right):r { binop(line,:<=>,l,r) }
+         | arg4(cx):l s { line = lineno } "==" !"=" - arg5(cx.right):r { binop(line,:==,l,r) }
+         | arg4(cx):l s { line = lineno } "===" - arg5(cx.right):r { binop(line,:===,l,r) }
+         | arg4(cx):l s { line = lineno } "!=" - arg5(cx.right):r { binop(line,:"!=",l,r) }
+         | arg4(cx):l s { line = lineno } "=~" - arg5(cx.right):r { binop(line,:"=~",l,r) }
+         | arg4(cx):l s { line = lineno } "!~" - arg5(cx.right):r { binop(line,:"!~",l,r) }
+         | arg5(cx)
 
-arg5(strict, no_do) = arg5(strict, no_do):l s { line = lineno } ">" !"=" !">" - arg6(false, no_do):r { binop(line,:>,l,r) }
-                    | arg5(strict, no_do):l s { line = lineno } ">=" - arg6(false, no_do):r { binop(line,:>=,l,r) }
-                    | arg5(strict, no_do):l s { line = lineno } "<" !"=" !"<" - arg6(false, no_do):r { binop(line,:<,l,r) }
-                    | arg5(strict, no_do):l s { line = lineno } "<=" !">" - arg6(false, no_do):r { binop(line,:<=,l,r) }
-                    | arg6(strict, no_do)
+arg5(cx) = arg5(cx):l s { line = lineno } ">" !"=" !">" - arg6(cx.right):r { binop(line,:>,l,r) }
+         | arg5(cx):l s { line = lineno } ">=" - arg6(cx.right):r { binop(line,:>=,l,r) }
+         | arg5(cx):l s { line = lineno } "<" !"=" !"<" - arg6(cx.right):r { binop(line,:<,l,r) }
+         | arg5(cx):l s { line = lineno } "<=" !">" - arg6(cx.right):r { binop(line,:<=,l,r) }
+         | arg6(cx)
 
-arg6(strict, no_do) = arg6(strict, no_do):l s { line = lineno } "|" !"|" !"=" - arg7(false, no_do):r { binop(line,:|,l,r) }
-                    | arg6(strict, no_do):l s { line = lineno } "^" !"=" - arg7(false, no_do):r { binop(line,:^,l,r) }
-                    | arg7(strict, no_do)
+arg6(cx) = arg6(cx):l s { line = lineno } "|" !"|" !"=" - arg7(cx.right):r { binop(line,:|,l,r) }
+         | arg6(cx):l s { line = lineno } "^" !"=" - arg7(cx.right):r { binop(line,:^,l,r) }
+         | arg7(cx)
 
-arg7(strict, no_do) = arg7(strict, no_do):l s { line = lineno } "&" !"&" !"=" - arg8(false, no_do):r { binop(line,:&,l,r) }
-                    | arg8(strict, no_do)
+arg7(cx) = arg7(cx):l s { line = lineno } "&" !"&" !"=" - arg8(cx.right):r { binop(line,:&,l,r) }
+         | arg8(cx)
 
-arg8(strict, no_do) = arg8(strict, no_do):l s { line = lineno } "<<" !"=" - arg9(false, no_do):r { binop(line,:<<,l,r) }
-                    | arg8(strict, no_do):l s { line = lineno } ">>" !"=" - arg9(false, no_do):r { binop(line,:>>,l,r) }
-                    | arg9(strict, no_do)
+arg8(cx) = arg8(cx):l s { line = lineno } "<<" !"=" - arg9(cx.right):r { binop(line,:<<,l,r) }
+         | arg8(cx):l s { line = lineno } ">>" !"=" - arg9(cx.right):r { binop(line,:>>,l,r) }
+         | arg9(cx)
 
-arg9(strict, no_do) = arg9(strict, no_do):l s { line = lineno } "+" !"=" - arg10(false, no_do):r { binop(line,:+,l,r) }
-                    | arg9(strict, no_do):l s { line = lineno } "-" !"=" - arg10(false, no_do):r { binop(line,:-,l,r) }
-                    | arg10(strict, no_do)
+arg9(cx) = arg9(cx):l s { line = lineno } "+" !"=" - arg10(cx.right):r { binop(line,:+,l,r) }
+         | arg9(cx):l s { line = lineno } "-" !"=" - arg10(cx.right):r { binop(line,:-,l,r) }
+         | arg10(cx)
 
-arg10(strict, no_do) = arg10(strict, no_do):l s { line = lineno } "*" !"*" !"=" - arg11(false, no_do):r { binop(line,:*,l,r) }
-                     | arg10(strict, no_do):l s { line = lineno } "/" !"=" - arg11(false, no_do):r { binop(line,:/,l,r) }
-                     | arg10(strict, no_do):l s { line = lineno } "%" !"=" - arg11(false, no_do):r { binop(line,:%,l,r) }
-                     | arg11(strict, no_do)
+arg10(cx) = arg10(cx):l s { line = lineno } "*" !"*" !"=" - arg11(cx.right):r { binop(line,:*,l,r) }
+          | arg10(cx):l s { line = lineno } "/" !"=" - arg11(cx.right):r { binop(line,:/,l,r) }
+          | arg10(cx):l s { line = lineno } "%" !"=" - arg11(cx.right):r { binop(line,:%,l,r) }
+          | arg11(cx)
 
-arg11(strict, no_do) = { line = lineno } "-" !numeric arg11(false, no_do):v { AST::Negate.new(line, v) }
-                     | { line = lineno } !{ strict } !numeric "-" - arg11(false, no_do):v { AST::Negate.new(line, v) }
-                     | { line = lineno } "-" numeric:l s "**" !"=" - arg11(false, no_do):r { AST::Negate.new(line, binop(line,:**,l,r)) }
-                     | arg12(strict, no_do)
+arg11(cx) = { line = lineno } "-" !numeric arg11(cx.right):v { AST::Send.new(line, v, :-@) }
+          | { line = lineno } !{ cx.strict? } !numeric "-" - arg11(cx.right):v { AST::Send.new(line, v, :-@) }
+          | { line = lineno } "-" numeric:l s "**" !"=" - arg11(cx.right):r { AST::Send.new(line, binop(line,:**,l,r), :-@) }
+          | arg12(cx)
 
-arg12(strict, no_do) = arg13(strict, no_do):l s { line = lineno } "**" !"=" - arg11(false, no_do):r { binop(line,:**,l,r) }
-                     | arg13(strict, no_do)
+arg12(cx) = arg13(cx):l s { line = lineno } "**" !"=" - arg11(cx.right):r { binop(line,:**,l,r) }
+          | arg13(cx)
 
-arg13(strict, no_do) = { line = lineno } "!" - arg11(false, no_do):v { AST::Send.new(line, v, :"!") }
-                     | { line = lineno } "~" - arg11(false, no_do):v { AST::Send.new(line, v, :~) }
-                     | { line = lineno } "+" arg11(false, no_do):v { AST::Send.new(line, v, :+@) }
-                     | { line = lineno } !{ strict } "+" - arg11(false, no_do):v { AST::Send.new(line, v, :+@) }
-                     | lhs(no_do):l s { line = lineno } "=" !"=" !">" !"~" - arg(false, no_do):v s kw("rescue") - arg(false, no_do):r { set_rhs(l, AST::Rescue.new(line, v, AST::RescueCondition.new(line, nil, r, nil))) }
-                     | lhs(no_do):l s { line = lineno } "=" !"=" !">" !"~" - arg(false, no_do):v { set_rhs(l, v) }
-                     | primary(strict, no_do):t s { line = lineno } op_asgn:o - arg(false, no_do):v &{ x = to_assign(line, t, v, o) } { x }
-                     | primary(strict, no_do)
+arg13(cx) = { line = lineno } "!" - arg11(cx.right):v { AST::Send.new(line, v, :"!") }
+          | { line = lineno } "~" - arg11(cx.right):v { AST::Send.new(line, v, :~) }
+          | { line = lineno } "+" arg11(cx.right):v { AST::Send.new(line, v, :+@) }
+          | { line = lineno } !{ cx.strict? } "+" - arg11(cx.right):v { AST::Send.new(line, v, :+@) }
+          | lhs(cx):l s { line = lineno } "=" !"=" !">" !"~" - arg(cx.right):v s kw("rescue") - arg(cx.right):r { set_rhs(l, AST::Rescue.new(line, v, AST::RescueCondition.new(line, nil, r, nil))) }
+          | lhs(cx):l s { line = lineno } "=" !"=" !">" !"~" - arg(cx.right):v { set_rhs(l, v) }
+          | primary(cx):t s { line = lineno } op_asgn:o - arg(cx.right):v &{ x = to_assign(line, t, v, o) } { x }
+          | primary(cx)
 
 
-aref_args = { line = lineno } assocs(false, false):l (- ",")? &(- "]") { AST::HashLiteral.new(line, l) }
-          | { line = lineno } "*" arg(false, false):s &(- "]") { AST::SplatValue.new(line, s) }
-          | { line = lineno } command(false, false):v &(- "]") { v }
-          | { line = lineno } args(false, false):l - "," - "*" arg(false, false):s &(- "]") { AST::ConcatArgs.new(line, AST::ArrayLiteral.new(line, l), s) }
-          | { line = lineno } args(false, false):l (- ",")? &(- "]") { AST::ArrayLiteral.new(line, l) }
+aref_args = { line = lineno } assocs(Cx.new):l (- ",")? &(- "]") { AST::HashLiteral.new(line, l) }
+          | { line = lineno } "*" arg(Cx.new):s &(- "]") { AST::SplatValue.new(line, s) }
+          | { line = lineno } command(Cx.new):v &(- "]") { v }
+          | { line = lineno } args(Cx.new):l - "," - "*" arg(Cx.new):s &(- "]") { AST::ConcatArgs.new(line, AST::ArrayLiteral.new(line, l), s) }
+          | { line = lineno } args(Cx.new):l (- ",")? &(- "]") { AST::ArrayLiteral.new(line, l) }
           | none &(- "]") { nil }
 
 paren_args = "(" - ")" { [nil, nil] }
-           | { line = lineno } "(" - call_args(false, false):a - ")" { a }
-           | { line = lineno } "(" - block_call(false):b - ")" { [b, nil] }
-           | { line = lineno } "(" - args(false, false):a - "," - block_call(false):b - ")" { [AST::ArrayLiteral.new(lineno, a + [b]), nil] }
+           | { line = lineno } "(" - call_args(Cx.new):a - ")" { a }
+           | { line = lineno } "(" - block_call(Cx.new):b - ")" { [b, nil] }
+           | { line = lineno } "(" - args(Cx.new):a - "," - block_call(Cx.new):b - ")" { [AST::ArrayLiteral.new(lineno, a + [b]), nil] }
            | sp paren_args:a { a }
 
-loose_call_args(no_do) = !kw("if") !kw("unless") !kw("while") !kw("until") call_args(true, no_do):a ~a
-call_args(strict, no_do) = &{false} # command(strict, no_do):c { [c] }
-                  | { line = lineno } assocs(strict, no_do):h s "," - "*" arg(false, no_do):s opt_block_arg(no_do):b { [AST::ConcatArgs.new(line, AST::HashLiteral.new(line, h), s), b] }
-                  | { line = lineno } assocs(strict, no_do):h opt_block_arg(no_do):b { [AST::HashLiteral.new(line, h), b] }
-                  | { line = lineno } args(strict, no_do):a s "," - assocs(false, no_do):h s "," - "*" arg(false, no_do):s opt_block_arg(no_do):b { [AST::ConcatArgs.new(line, AST::ArrayLiteral.new(line, a + [AST::HashLiteral.new(line, h)]), s), b] }
-                  | { line = lineno } args(strict, no_do):a s "," - assocs(false, no_do):h opt_block_arg(no_do):b { [AST::ArrayLiteral.new(line, a + [AST::HashLiteral.new(line, h)]), b] }
-                  | { line = lineno } args(strict, no_do):a s "," - "*" arg(false, no_do):s opt_block_arg(no_do):b { [AST::ConcatArgs.new(line, AST::ArrayLiteral.new(line, a), s), b] }
-                  | { line = lineno } arg(strict, no_do):i s "," - args(strict, no_do):a opt_block_arg(no_do):b { [AST::ArrayLiteral.new(line, [i] + a), b] }
-                  | command(strict, no_do):c { [c, nil] }
-                  | { line = lineno } args(strict, no_do):a opt_block_arg(no_do):b { [AST::ArrayLiteral.new(line, a), b] }
-                  | { line = lineno } "*" arg(false, no_do):s opt_block_arg(no_do):b { [AST::SplatValue.new(line, s), b] }
-                  | block_arg(no_do):b { [nil, b] }
+loose_call_args(cx) = !kw("if") !kw("unless") !kw("while") !kw("until") call_args(cx.strict):a ~a
+call_args(cx) = &{false} # command(cx):c { [c] }
+              | { line = lineno } assocs(cx):h s "," - "*" arg(cx.right):s opt_block_arg(cx.right):b { [AST::ConcatArgs.new(line, AST::HashLiteral.new(line, h), s), b] }
+              | { line = lineno } assocs(cx):h opt_block_arg(cx.right):b { [AST::HashLiteral.new(line, h), b] }
+              | { line = lineno } args(cx):a s "," - assocs(cx.right):h s "," - "*" arg(cx.right):s opt_block_arg(cx.right):b { [AST::ConcatArgs.new(line, AST::ArrayLiteral.new(line, a + [AST::HashLiteral.new(line, h)]), s), b] }
+              | { line = lineno } args(cx):a s "," - assocs(cx.right):h opt_block_arg(cx.right):b { [AST::ArrayLiteral.new(line, a + [AST::HashLiteral.new(line, h)]), b] }
+              | { line = lineno } args(cx):a s "," - "*" arg(cx.right):s opt_block_arg(cx.right):b { [AST::ConcatArgs.new(line, AST::ArrayLiteral.new(line, a), s), b] }
+              | { line = lineno } arg(cx):i s "," - args(cx.right):a opt_block_arg(cx.right):b { [AST::ArrayLiteral.new(line, [i] + a), b] }
+              | command(cx):c { [c, nil] }
+              | { line = lineno } args(cx):a opt_block_arg(cx.right):b { [AST::ArrayLiteral.new(line, a), b] }
+              | { line = lineno } "*" arg(cx.right):s opt_block_arg(cx.right):b { [AST::SplatValue.new(line, s), b] }
+              | block_arg(cx):b { [nil, b] }
 
 
-command_args(no_do) = !"(" !"[" !"{" !"/" !"%" !"-" !"+" !"<<" s loose_call_args(no_do):a { a }
+command_args(cx) = !"(" !"[" !"{" !"/" !"%" !"-" !"+" !"<<" s loose_call_args(cx):a { a }
 
-block_arg(no_do) = { line = lineno } "&" - arg(false, no_do):v { AST::BlockPass.new(line, v) }
-opt_block_arg(no_do) = - "," - block_arg(no_do):v { v }
+block_arg(cx) = { line = lineno } "&" - arg(cx.right):v { AST::BlockPass.new(line, v) }
+opt_block_arg(cx) = - "," - block_arg(cx):v { v }
               | none { nil }
 
-args(strict, no_do) = args(strict, no_do):l s "," - arg(false, no_do):v !(s "=>") { l + [v] }
-             | arg(strict, no_do):v !(s "=>") { [v] }
+args(cx) = args(cx):l s "," - arg(cx.right):v !(s "=>") { l + [v] }
+         | arg(cx):v !(s "=>") { [v] }
 
-mrhs = { line = lineno } args(false, false):l &{ l.size > 1 } { AST::ArrayLiteral.new(line, l) }
-     | { line = lineno } args(false, false):l s "," - "*" arg(false, false):v { AST::ConcatArgs.new(line, l, v) }
-     | { line = lineno } "*" arg(false, false):v { AST::SplatValue.new(line, v) }
+mrhs = { line = lineno } args(Cx.new):l &{ l.size > 1 } { AST::ArrayLiteral.new(line, l) }
+     | { line = lineno } args(Cx.new):l s "," - "*" arg(cx.right):v { AST::ConcatArgs.new(line, l, v) }
+     | { line = lineno } "*" arg(cx.right):v { AST::SplatValue.new(line, v) }
 
 
-primary(strict, no_do) = primary(strict, no_do):t "[" - aref_args:a - "]" { AST::SendWithArguments.new(lineno, t, :[], a) }
-                | { line = lineno } primary(strict, no_do):t dot_or_colon - operation2:n paren_args:a s brace_block(no_do):b &{ a[1].nil? } { x = AST::SendWithArguments.new(lineno, t, n.to_sym, a[0]); x.block = b; x }
-                | { line = lineno } primary(strict, no_do):t dot_or_colon - operation2:n s brace_block(no_do):b { x = AST::Send.new(lineno, t, n.to_sym); x.block = b; x }
-                | { line = lineno } primary(strict, no_do):t dot_or_colon - operation2:n paren_args:a { x = AST::SendWithArguments.new(lineno, t, n.to_sym, a[0]); x.block = a[1]; x }
-                | { line = lineno } primary(strict, no_do):t dot_or_colon - operation3:n { AST::Send.new(lineno, t, n.to_sym) }
-                | { line = lineno } primary(strict, no_do):t "::" - constant:c { AST::ScopedConstant.new(lineno, t, c.to_sym) }
-                | { line = lineno } primary(strict, no_do):t s "." - constant:c { AST::Send.new(lineno, t, c.to_sym) }
-                | { line = lineno } operation:n paren_args:a s brace_block(no_do):b &{ a[1].nil? } { x = AST::SendWithArguments.new(lineno, AST::Self.new(lineno), n.to_sym, a[0], true); x.block = b; x }
-                | { line = lineno } operation:n paren_args:a { x = AST::SendWithArguments.new(lineno, AST::Self.new(lineno), n.to_sym, a[0], true); x.block = a[1]; x }
-                | { line = lineno } operation:n s brace_block(no_do):b { x = AST::Send.new(lineno, AST::Self.new(lineno), n.to_sym, true); x.block = b; x }
-                | { line = lineno } kw("super") paren_args:v s brace_block(no_do):b &{ a[1].nil? } { x = AST::Super.new(lineno, v[0]); x.block = b; x }
-                | { line = lineno } kw("super") paren_args:v { x = AST::Super.new(lineno, v[0]); x.block = v[1]; x }
-                | { line = lineno } kw("super") s brace_block(no_do):b { x = AST::ZSuper.new(lineno); x.block = b; x }
-                | { line = lineno } kw("super") { AST::ZSuper.new(lineno) }
-                | literal
-                | strings(strict)
-                | xstring
-                | regexp(strict)
-                | words
-                | qwords
-                | { line = lineno } !"defined?" fid:n { AST::Send.new(lineno, AST::Self.new(lineno), n.to_sym, true) }
-                | variable
-                | kw("begin") - block_body:b - kw("end") { b }
-                | "(" - expr(false, false):e - ")" { e }
-                | { line = lineno } "(" - statements:s - ")" { AST::Block.new(lineno, s) }
-                | { line = lineno } "::" - constant:c { AST::ToplevelConstant.new(lineno, c.to_sym) }
-                | { line = lineno } "[" - aref_args:a - "]" { AST::ArrayLiteral.new(lineno, a) }
-                | { line = lineno } "{" - assoc_list:l - "}" { AST::HashLiteral.new(lineno, l) }
-                | { line = lineno } kw("return") { AST::Return.new(lineno, nil) }
-                | { line = lineno } kw("yield") s "(" - call_args(false, false):v - ")" { x = AST::Yield.new(lineno, v[0], true); x.block = v[1]; x }
-                | { line = lineno } kw("yield") s "(" - ")" { AST::Yield.new(lineno, nil, false) }
-                | { line = lineno } kw("yield") { AST::Yield.new(lineno, nil, false) }
-                | { line = lineno } kw("defined?") - "(" - expr(false, false):v - ")" { AST::Defined.new(lineno, v) }
-                | { line = lineno } kw("if") - expr(false, no_do):e s then - statements:s - if_tail(no_do):l - kw("end") { AST::If.new(lineno, e, s, l) }
-                | { line = lineno } kw("unless") - expr(false, no_do):e s then - statements:s - else_clause?:f - kw("end") { AST::If.new(lineno, e, f, s) }
-                | { line = lineno } kw("while") - expr(false, true):e s do - statements:s - kw("end") { AST::While.new(lineno, e, s, true) }
-                | { line = lineno } kw("until") - expr(false, true):e s do - statements:s - kw("end") { AST::Until.new(lineno, e, s, true) }
-                | { line = lineno } kw("case") opt_terms - case_body:b - else_clause:e - kw("end") { AST::Case.new(lineno, b, e) }
-                | { line = lineno } kw("case") - expr(false, no_do):v opt_terms - case_body:b - else_clause:e - kw("end") { AST::ReceiverCase.new(lineno, v, b, e) }
-                | { line = lineno } kw("for") - for_var:a - kw("in") - expr(false, no_do):t s do - statements:b - kw("end") { x = AST::Send.new(lineno, t, :each); x.block = AST::For.new(lineno, a, b); x }
-                | { line = lineno } kw("class") - "<<" - expr(false, no_do) term:e - block_body:b - kw("end") { AST::SClass.new(lineno, e, b) }
-                | { line = lineno } kw("class") - cpath:n superclass:s - block_body:b - kw("end") { AST::Class.new(lineno, n, s, b) }
-                | { line = lineno } kw("module") - cpath:n - block_body:b - kw("end") { AST::Module.new(lineno, n, b) }
-                | { line = lineno } kw("def") - fname:n s f_arglist:a - block_body:b - kw("end") { x = AST::Define.new(lineno, n.to_sym, b); x.arguments = a; x }
-                | { line = lineno } kw("def") - singleton:o dot_or_colon - fname:n s f_arglist:a - block_body:b - kw("end") { x = AST::DefineSingleton.new(lineno, o, n.to_sym, b); x.body.arguments = a; x }
-                | { line = lineno } kw("break") { AST::Break.new(lineno, nil) }
-                | { line = lineno } kw("next") { AST::Next.new(lineno, nil) }
-                | { line = lineno } kw("redo") { AST::Redo.new(lineno) }
-                | { line = lineno } kw("retry") { AST::Retry.new(lineno) }
+primary(cx) = primary(cx):t "[" - aref_args:a - "]" { AST::SendWithArguments.new(lineno, t, :[], a) }
+            | { line = lineno } primary(cx):t dot_or_colon - operation2:n paren_args:a s brace_block(cx.right):b &{ a[1].nil? } { x = AST::SendWithArguments.new(lineno, t, n.to_sym, a[0]); x.block = b; x }
+            | { line = lineno } primary(cx):t dot_or_colon - operation2:n s brace_block(cx.right):b { x = AST::Send.new(lineno, t, n.to_sym); x.block = b; x }
+            | { line = lineno } primary(cx):t dot_or_colon - operation2:n paren_args:a { x = AST::SendWithArguments.new(lineno, t, n.to_sym, a[0]); x.block = a[1]; x }
+            | { line = lineno } primary(cx):t dot_or_colon - operation3:n { AST::Send.new(lineno, t, n.to_sym) }
+            | { line = lineno } primary(cx):t "::" - constant:c { AST::ScopedConstant.new(lineno, t, c.to_sym) }
+            | { line = lineno } primary(cx):t s "." - constant:c { AST::Send.new(lineno, t, c.to_sym) }
+            | { line = lineno } operation:n paren_args:a s brace_block(cx.right):b &{ a[1].nil? } { x = AST::SendWithArguments.new(lineno, AST::Self.new(lineno), n.to_sym, a[0], true); x.block = b; x }
+            | { line = lineno } operation:n paren_args:a { x = AST::SendWithArguments.new(lineno, AST::Self.new(lineno), n.to_sym, a[0], true); x.block = a[1]; x }
+            | { line = lineno } operation:n s brace_block(cx.right):b { x = AST::Send.new(lineno, AST::Self.new(lineno), n.to_sym, true); x.block = b; x }
+            | { line = lineno } kw("super") paren_args:v s brace_block(cx.right):b &{ a[1].nil? } { x = AST::Super.new(lineno, v[0]); x.block = b; x }
+            | { line = lineno } kw("super") paren_args:v { x = AST::Super.new(lineno, v[0]); x.block = v[1]; x }
+            | { line = lineno } kw("super") s brace_block(cx.right):b { x = AST::ZSuper.new(lineno); x.block = b; x }
+            | { line = lineno } kw("super") { AST::ZSuper.new(lineno) }
+            | literal
+            | strings(cx)
+            | xstring
+            | regexp(cx)
+            | words
+            | qwords
+            | { line = lineno } !"defined?" fid:n { AST::Send.new(lineno, AST::Self.new(lineno), n.to_sym, true) }
+            | variable
+            | { line = lineno } kw("begin") - block_body:b - kw("end") { AST::Begin.new(line, deblockify(b)) }
+            | "(" - expr(Cx.new):e - ")" { e }
+            | { line = lineno } "(" - statements:s - ")" { AST::Block.new(lineno, s) }
+            | { line = lineno } "::" - constant:c { AST::ToplevelConstant.new(lineno, c.to_sym) }
+            | { line = lineno } "[" - aref_args:a - "]" { AST::ArrayLiteral.new(lineno, a) }
+            | { line = lineno } "{" - assoc_list:l - "}" { AST::HashLiteral.new(lineno, l) }
+            | { line = lineno } kw("return") { AST::Return.new(lineno, nil) }
+            | { line = lineno } kw("yield") s "(" - call_args(Cx.new):v - ")" { x = AST::Yield.new(lineno, v[0], true); x.block = v[1]; x }
+            | { line = lineno } kw("yield") s "(" - ")" { AST::Yield.new(lineno, nil, false) }
+            | { line = lineno } kw("yield") { AST::Yield.new(lineno, nil, false) }
+            | { line = lineno } kw("defined?") - "(" - expr(Cx.new):v - ")" { AST::Defined.new(lineno, v) }
+            | { line = lineno } kw("if") - expr(cx.right):e s then - statements:s - if_tail(cx.right):l - kw("end") { AST::If.new(lineno, e, deblockify(s), l) }
+            | { line = lineno } kw("unless") - expr(cx.right):e s then - statements:s - else_clause?:f - kw("end") { AST::If.new(lineno, e, f, deblockify(s)) }
+            | { line = lineno } kw("while") - expr(Cx.no_do):e s do - statements:s - kw("end") { AST::While.new(lineno, e, s, true) }
+            | { line = lineno } kw("until") - expr(Cx.no_do):e s do - statements:s - kw("end") { AST::Until.new(lineno, e, s, true) }
+            | { line = lineno } kw("case") opt_terms - case_body:b - else_clause?:e - kw("end") { AST::Case.new(lineno, b, e) }
+            | { line = lineno } kw("case") - expr(cx.right):v opt_terms - case_body:b - else_clause?:e - kw("end") { AST::ReceiverCase.new(lineno, v, b, e) }
+            | { line = lineno } kw("for") - for_var:a - kw("in") - expr(cx.right):t s do - statements:b - kw("end") { x = AST::Send.new(lineno, t, :each); x.block = AST::For.new(lineno, a, b); x }
+            | { line = lineno } kw("class") - "<<" - expr(cx.right):e term - block_body:b - kw("end") { AST::SClass.new(lineno, e, b) }
+            | { line = lineno } kw("class") - cpath:n superclass:s - block_body:b - kw("end") { AST::Class.new(lineno, n, s, b) }
+            | { line = lineno } kw("module") - cpath:n - block_body:b - kw("end") { AST::Module.new(lineno, n, b) }
+            | { line = lineno } kw("def") - fname:n s f_arglist:a - block_body:b - kw("end") { x = AST::Define.new(lineno, n.to_sym, b); x.arguments = a; x }
+            | { line = lineno } kw("def") - singleton:o dot_or_colon - fname:n s f_arglist:a - block_body:b - kw("end") { x = AST::DefineSingleton.new(lineno, o, n.to_sym, b); x.body.arguments = a; x }
+            | { line = lineno } kw("break") { AST::Break.new(lineno, nil) }
+            | { line = lineno } kw("next") { AST::Next.new(lineno, nil) }
+            | { line = lineno } kw("redo") { AST::Redo.new(lineno) }
+            | { line = lineno } kw("retry") { AST::Retry.new(lineno) }
 
 then = ":"
      | kw("then")
@@ -557,27 +607,27 @@ do = term
    | ":"
    | kw("do")
 
-if_tail(no_do) = { line = lineno } kw("elsif") - expr(false, no_do):c s then - statements:s - if_tail(no_do):l { AST::If.new(lineno, c, s, l) }
-        | else_clause:e { e }
-        | none { nil }
+if_tail(cx) = { line = lineno } kw("elsif") - expr(cx.right):c s then - statements:s - if_tail(cx):l { AST::If.new(lineno, c, deblockify(s), l) }
+            | else_clause:e { e }
+            | none { nil }
 
-else_clause = kw("else") - statements:s { s }
+else_clause = kw("else") - statements:s { deblockify(s) }
 
 for_var = mlhs
-        | lhs(false)
+        | lhs(Cx.new)
 
 block_var = { line = lineno } mlhs_head:l - mlhs_item:i { AST::MultipleAssignment.new(line, AST::ArrayLiteral.new(line, l + [i]), nil, nil) }
-          | { line = lineno } mlhs_head:l - splat_lhs:i - "," - "&" - lhs(false):b  { x = AST::MultipleAssignment.new(line, AST::ArrayLiteral.new(line, l), nil, i); x.block = b; x }
-          | { line = lineno } mlhs_head:l - "&" - lhs(false):b { x = AST::MultipleAssignment.new(line, AST::ArrayLiteral.new(line, l), nil, nil); x.block = b; x }
-          | { line = lineno } splat_lhs:i - "&" - lhs(false):b { x = AST::MultipleAssignment.new(line, nil, nil, i); x.block = b; x }
-          | { line = lineno } "&" - lhs(false):b { x = AST::MultipleAssignment.new(line, nil, nil, i); x.block = b; x }
+          | { line = lineno } mlhs_head:l - splat_lhs:i - "," - "&" - lhs(Cx.new):b  { x = AST::MultipleAssignment.new(line, AST::ArrayLiteral.new(line, l), nil, i); x.block = b; x }
+          | { line = lineno } mlhs_head:l - "&" - lhs(Cx.new):b { x = AST::MultipleAssignment.new(line, AST::ArrayLiteral.new(l), nil, nil); x.block = b; x }
+          | { line = lineno } splat_lhs:i - "&" - lhs(Cx.new):b { x = AST::MultipleAssignment.new(line, nil, nil, i); x.block = b; x }
+          | { line = lineno } "&" - lhs(Cx.new):b { x = AST::MultipleAssignment.new(line, nil, nil, i); x.block = b; x }
           | { line = lineno } mlhs_head:l - splat_lhs:i { AST::MultipleAssignment.new(line, AST::ArrayLiteral.new(line, l), nil, i) }
           | { line = lineno } mlhs_head:l { AST::MultipleAssignment.new(line, AST::ArrayLiteral.new(line, l), nil, nil) }
           | { line = lineno } splat_lhs:i { AST::MultipleAssignment.new(line, nil, nil, i) }
           | { line = lineno } mlhs_item:i { i }
           | none { 0 }
 
-splat_lhs = "*" - lhs(false):s { s }
+splat_lhs = "*" - lhs(Cx.new):s { s }
           | "*" { true }
 
 opt_block_var = "|" - block_var:v - "|" { v }
@@ -585,29 +635,29 @@ opt_block_var = "|" - block_var:v - "|" { v }
 
 do_block = kw("do") - opt_block_var:v - statements:b - kw("end") { AST::Iter.new(lineno, v, deblockify(b)) }
 
-block_call(strict) = block_call(strict):t dot_or_colon - { line = lineno } operation2:n paren_args:a { x = AST::SendWithArguments.new(line, t, n.to_sym, a[0]); x.block = a[1]; x }
-                   | block_call(strict):t dot_or_colon - { line = lineno } operation2:n { AST::Send.new(line, t, n.to_sym) }
-                   | command(strict, false):c s do_block:b { c.block = b; c }
+block_call(cx) = block_call(cx):t dot_or_colon - { line = lineno } operation2:n paren_args:a { x = AST::SendWithArguments.new(line, t, n.to_sym, a[0]); x.block = a[1]; x }
+               | block_call(cx):t dot_or_colon - { line = lineno } operation2:n { AST::Send.new(line, t, n.to_sym) }
+               | command(cx):c s do_block:b { c.block = b; c }
 
 
-brace_block(no_do) = "{" - opt_block_var:v - statements:b - "}" { AST::Iter.new(lineno, v, deblockify(b)) }
-                   | !{ no_do } kw("do") - opt_block_var:v - statements:b - kw("end") { AST::Iter.new(lineno, v, deblockify(b)) }
+brace_block(cx) = "{" - opt_block_var:v - statements:b - "}" { AST::Iter.new(lineno, v, deblockify(b)) }
+                | !{ cx.no_do? } kw("do") - opt_block_var:v - statements:b - kw("end") { AST::Iter.new(lineno, v, deblockify(b)) }
 
-when_clause = { line = lineno } kw("when") - when_args:a s then - statements:s { AST::When.new(line, a, s) }
+when_clause = { line = lineno } kw("when") - when_args:a s then - statements:s { AST::When.new(line, a, deblockify(s)) }
 
 case_body = when_clause:w - case_body:l { [w] + l }
           | when_clause:w { [w] }
 
-when_args = { line = lineno } args(false, false):a - "," - "*" arg(false, false):s { AST::ArrayLiteral.new(line, a + [AST::When.new(line, s, nil)]) }
-          | { line = lineno } args(false, false):a { AST::ArrayLiteral.new(line, a) }
-          | { line = lineno } "*" arg(false, false):s { AST::ArrayLiteral.new(line, [AST::When.new(line, s, nil)]) }
+when_args = { line = lineno } args(Cx.new):a - "," - "*" arg(Cx.new):s { AST::ArrayLiteral.new(line, a + [AST::When.new(line, s, nil)]) }
+          | { line = lineno } args(Cx.new):a { AST::ArrayLiteral.new(line, a) }
+          | { line = lineno } "*" arg(Cx.new):s { AST::ArrayLiteral.new(line, [AST::When.new(line, s, nil)]) }
 
-rescue_clause = kw("rescue") s exc_list?:l s exc_var:v s then - statements:s (- rescue_clause):n { AST::RescueCondition.new(lineno, l, s, n) }
+rescue_clause = kw("rescue") s exc_list?:l s exc_var:v s then - statements:s (- rescue_clause)?:n { s.array.unshift(v) if v; AST::RescueCondition.new(lineno, l && AST::ArrayLiteral.new(lineno, l), s, n) }
 
-exc_list = exc_list:l s "," - arg(false, false):i { l + [i] }
-         | arg(false, false):i { [i] }
+exc_list = exc_list:l s "," - arg(Cx.new):i { l + [i] }
+         | arg(Cx.new):i { [i] }
 
-exc_var = "=>" - lhs(false):v { v }
+exc_var = "=>" - lhs(Cx.new):v { set_rhs(v, AST::CurrentException.new(v.line)) }
         | none { nil }
 
 ensure_clause = kw("ensure") - statements:s { s }
@@ -630,12 +680,12 @@ char_escape = "\\\\" { ?\\ }
             | "\\" <.> { escaped_char(text) }
 
 
-strings(strict) = { line = lineno } string:s { AST.str(lineno, s) }
-                | { line = lineno } "%Q" nesting_string(true):s { AST.str(lineno, s) }
-                | { line = lineno } "%q" nesting_string(false):s { AST.str(lineno, s) }
-                | { line = lineno } "%" !"=" !any_whitespace nesting_string(true):s { AST.str(lineno, s) }
-                | { line = lineno } !{ strict } "%=" qstring(["="]):s "=" { AST.str(lineno, s) }
-                | "<<" <"-"?> heredoc_ref(text):r { r }
+strings(cx) = { line = lineno } string:s { AST.str(lineno, s) }
+            | { line = lineno } "%Q" nesting_string(true):s { AST.str(lineno, s) }
+            | { line = lineno } "%q" nesting_string(false):s { AST.str(lineno, s) }
+            | { line = lineno } "%" !"=" !any_whitespace nesting_string(true):s { AST.str(lineno, s) }
+            | { line = lineno } !{ cx.strict? } "%=" qstring(["="]):s "=" { AST.str(lineno, s) }
+            | "<<" <"-"?> heredoc_ref(text):r { r }
 
 heredoc_ref(indent) = { line = lineno } "'" < /[^']+/ > "'" { heredoc(lineno, text, indent != '') }
                     | { line = lineno } "\"" < /[^"]+/ > "\"" { heredoc(lineno, text, indent != '', AST::DynamicString) }
@@ -651,8 +701,8 @@ string1 = "\"" qstring(["\""]):s "\"" { s }
 xstring = "`" qstring(["`"]):s "`" { AST.str(lineno, s, AST::ExecuteString, AST::DynamicExecuteString) }
         | "%x" nesting_string(true):s { AST.str(lineno, s, AST::ExecuteString, AST::DynamicExecuteString) }
 
-regexp(strict) = "/" !"=" !any_whitespace qstring(["/"]):s "/" re_flags:f { AST.str(lineno, s, AST::RegexLiteral, f =~ /o/ ? AST::DynamicOnceRegex : AST::DynamicRegex, regex_flags(f)) }
-               | !{ strict } "/" qstring(["/"]):s "/" re_flags:f { AST.str(lineno, s, AST::RegexLiteral, f =~ /o/ ? AST::DynamicOnceRegex : AST::DynamicRegex, regex_flags(f)) }
+regexp(cx) = "/" !"=" !any_whitespace qstring(["/"]):s "/" re_flags:f { AST.str(lineno, s, AST::RegexLiteral, f =~ /o/ ? AST::DynamicOnceRegex : AST::DynamicRegex, regex_flags(f)) }
+               | !{ cx.strict? } "/" qstring(["/"]):s "/" re_flags:f { AST.str(lineno, s, AST::RegexLiteral, f =~ /o/ ? AST::DynamicOnceRegex : AST::DynamicRegex, regex_flags(f)) }
                | "%r" nesting_string(true):s re_flags:f { AST.str(lineno, s, AST::RegexLiteral, f =~ /o/ ? AST::DynamicOnceRegex : AST::DynamicRegex, regex_flags(f)) }
 
 re_flags = < /[A-Za-z]*/ > { text }
@@ -698,7 +748,7 @@ dyn_string_part = { line = lineno } cvar:n { AST::ClassVariableAccess.new(line, 
                 | { line = lineno } ivar:n { AST::InstanceVariableAccess.new(line, n.to_sym) }
                 | { line = lineno } backref:n { AST::BackRef.new(line, n.to_sym) }
                 | { line = lineno } gvar:n { AST::GlobalVariableAccess.for_name(line, n.to_sym) }
-                | "{" - statements:s - "}" {s}
+                | "{" - statements:s - "}" { deblockify(s) }
 
 
 symbol = { line = lineno } ":" sym:s { AST::SymbolLiteral.new(line, s.to_sym) }
@@ -739,7 +789,7 @@ variable = { line = lineno } name:n { AST::Send.new(line, AST::Self.new(line), n
 
 backref = "$" /[&`'+]|[1-9][0-9]*/
 
-superclass = s "<" - expr(false, false):e term { e }
+superclass = s "<" - expr(Cx.new):e term { e }
            | term { nil }
 
 f_arglist = "(" - f_args:a - ")" { a }
@@ -768,7 +818,7 @@ gvar = < "$" word > { text }
      | < "$" /[0~*$?!@;,.=:<>\/\\"]/ > { text }
      | < "$-" /[A-Za-z0-9]/ > { text }
 
-f_opt = { line = lineno } name:n - "=" - arg(false, false):v { AST::LocalVariableAssignment.new(line, n.to_sym, v) }
+f_opt = { line = lineno } name:n - "=" - arg(Cx.new):v { AST::LocalVariableAssignment.new(line, n.to_sym, v) }
 
 f_optarg = f_optarg:l - "," - f_opt:a { l + [a] }
          | f_opt:a { [a] }
@@ -781,16 +831,16 @@ opt_f_block_arg = - "," - f_block_arg:b { b }
                 | none { nil }
 
 singleton = variable:v { v }
-          | "(" - expr(false, false):e - ")" { e }
+          | "(" - expr(Cx.new):e - ")" { e }
 
-assoc_list = assocs(false, false):a trailer { a }
-           | args(false, false):a trailer { a }
+assoc_list = assocs(Cx.new):a trailer { a }
+           | args(Cx.new):a trailer { a }
            | none { [] }
 
-assocs(strict, no_do) = assocs(strict, no_do):l - "," - assoc(false, no_do):x { l + x }
-               | assoc(strict, no_do):x { x }
+assocs(cx) = assocs(cx):l - "," - assoc(cx.right):x { l + x }
+               | assoc(cx):x { x }
 
-assoc(strict, no_do) = arg(strict, no_do):k - "=>" - arg(false, no_do):v { [k,v] }
+assoc(cx) = arg(cx):k - "=>" - arg(cx.right):v { [k,v] }
 
 operation = !"defined?" fid:f { f }
           | name:i { i }
