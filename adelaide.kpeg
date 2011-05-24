@@ -92,7 +92,6 @@
         x << part.dup
       else
         x << ""
-        x << ""
       end
     end
     front = ""
@@ -323,7 +322,7 @@
   def set_rhs(lhs, rhs)
     case lhs
     when AST::MultipleAssignment
-      splat = lhs.splat
+      splat = lhs.splat || lhs.empty_splat
       splat = splat.value if AST::SplatAssignment === splat
       lhs = AST::MultipleAssignment.new(lhs.line, lhs.left, rhs, splat)
     when AST::ElementAssignment
@@ -349,7 +348,7 @@
 
 
   def blockify(line, array)
-    if array.size == 1 && !(AST::Begin === array.first)
+    if array.size == 1 #&& !(AST::Begin === array.first)
       array.first
     elsif array.size == 0
       AST::NilLiteral.new(line)
@@ -457,7 +456,7 @@ program = statements
 statements = - { line = lineno } stmts:s opt_terms { blockify(line, s) }
 
 block_body = { l1 = lineno } statements:b - { l2 = lineno } (- rescue_clause)?:resc - else_clause?:els - { l3 = lineno } ensure_clause?:ens
-               { b = AST::Rescue.new(l2, b, resc, els) if resc || els; b = AST::Ensure.new(l3, b, ens) if ens; b = AST::Block.new(l1, []) if AST::NilLiteral === b; b = AST::Block.new(l1, [b]) unless AST::Block === b; b }
+               { b = AST::Rescue.new(l2, AST::NilLiteral === b ? nil : b, resc, els) if resc || els; b = AST::Ensure.new(l3, b, ens) if ens; b = AST::Block.new(l1, []) if AST::NilLiteral === b; b = AST::Block.new(l1, [b]) unless AST::Block === b; b }
 
 stmts = stmts:l terms - statement:s { l.pop if idempotent?(l.last); l + [s] }
       | statement:s { [s] }
@@ -728,7 +727,7 @@ primary(cx) = primary(cx):t "[" - aref_args:a - "]" { transform(AST::SendWithArg
             | qwords
             | { line = lineno } !"defined?" fid:n { transform(AST::Send.new(lineno, AST::Self.new(lineno), n.to_sym, true)) }
             | variable
-            | { line = lineno } kw("begin") - block_body:b - kw("end") { AST::Begin.new(line, b) }
+            | { line = lineno } kw("begin") - block_body:b - kw("end") { b.array.size == 0 ? AST::NilLiteral.new(line) : AST::Begin.new(line, b.array.size == 1 ? b.array.first : b) }
             | "(" - expr(Cx.new):e - ")" { e }
             | "(" - statements:s - ")" { s }
             | { line = lineno } "::" - constant:c { AST::ToplevelConstant.new(lineno, c.to_sym) }
@@ -853,7 +852,7 @@ heredoc_ref(indent) = { line = lineno } "'" < /[^']+/ > "'" { heredoc(lineno, te
                     | { line = lineno } "`" < /[^`]+/ > "`" { heredoc(lineno, text, indent != '', AST::DynamicExecuteString) }
                     | { line = lineno } < word > { heredoc(lineno, text, indent != '', AST::DynamicString) }
 
-string = string:a s string1:b { a+b }
+string = string:a s string1:b { a.all? {|x| String === x } ? a+b : a+[nil]+b }
        | string1
 
 string1 = "\"" qstring(["\""]):s "\"" { s }
@@ -901,7 +900,7 @@ lstring_item(stops,escapes) = !{ stops.include?("\\") } &{ stops.include?("\n") 
 qstring(stops) = qstring_item(stops)*:s { s }
 qstring_item(stops) = !{ stops.include?("\\") } "\\" newline { "" }
                     | !{ stops.include?("\\") } &"\\" char_escape:c { c.chr }
-                    | !{ stops.include?('#') } "#" dyn_string_part:d { case d when nil; nil; when AST::StringLiteral; d.string; when AST::ToString, AST::DynamicString; d; else; AST::ToString.new(lineno, d); end }
+                    | !{ stops.include?('#') } "#" dyn_string_part:d { case d when nil; AST::StringLiteral.new(lineno, ""); when AST::StringLiteral; d.string; when AST::ToString, AST::DynamicString; d; else; AST::ToString.new(lineno, d); end }
                     | !{ stops.include?("\n") } newline:nl { nl }
                     | < . > !{ stops.include?(text) } { text }
 
